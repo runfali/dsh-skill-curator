@@ -55,6 +55,7 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 - **notifyMode** — off / on / verbose (segmented buttons)
 - **reviewProvider / reviewModel** — optional review subagent model override (empty = follow the session's current model)
 - **reviewBaseUrl / reviewApiKey** — optional custom review endpoint (OpenAI-compatible `/chat/completions`). When `reviewBaseUrl` + `reviewModel` are set, the review subagent runs against that endpoint through a dedicated adapter route (provider name = `reviewProvider`, or `skill-curator-review` by default). Settings are read live on every request — no restart needed
+- **Review history** persists to `~/.dsh/skill-curator/reviews.json` (last 50 entries) — survives plugin removal/reinstall and restarts
 - **Review fallback** — if the custom endpoint/model fails (HTTP/network/auth/rate-limit/model missing/timeout), the review automatically retries **once** on the session's own model. The fallback is marked in the host log, the review log, and the status panel (`⚠️已回退主模型`)
 - **reviewTimeoutMs** — review subagent budget (default 15 min)
 - **digestTail / digestMaxChars** — digest shape

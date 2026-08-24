@@ -11,10 +11,18 @@
  * 3. 子代理排除：header.origin==='subagent' / delegationDepth>0 不计数
  * 4. enabled=false 不触发；interval 动态生效
  * 5. 互斥：评审进行中重复触发被跳过
+ *
+ * 评审历史持久化到临时文件（DSH_CURATOR_HISTORY 必须在 import 前设置——
+ * 模块单例在加载时按该路径同步读盘），避免测试污染真实 ~/.dsh。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { apply, name, reviewLog } from '../src/index.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+process.env.DSH_CURATOR_HISTORY = join(mkdtempSync(join(tmpdir(), 'sc-apply-')), 'reviews.json')
+const { apply, name, reviewLog } = await import('../src/index.js')
 import { Config } from '../src/settings.js'
 
 /** 手工把 base 与 schema 默认值合并（模拟 settings 解析结果）。 */

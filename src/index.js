@@ -26,8 +26,9 @@ import { createSettings } from './settings.js'
 import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
-import { runSkillReview, createReviewLog } from './reviewer.js'
+import { runSkillReview } from './reviewer.js'
 import { createSkillToolDefinitions, TOOL_NAMES, CURATOR_AUTHOR } from './skill-tools.js'
+import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
 export const name = 'skill-curator'
@@ -44,15 +45,27 @@ const VERSION = (() => {
   }
 })()
 
-/** 宿主侧状态（评审记录，供状态接口/日志）。 */
-export const reviewLog = createReviewLog()
+/**
+ * 宿主侧评审历史（持久化：<DSH_HOME>/skill-curator/reviews.json，patch
+ * config.historyPath 可覆盖）。卸载/重装/重启后记录仍在；模块级单例，
+ * 启动同步加载（apply 必须同步），record 即落盘。
+ */
+export const reviewLog = createHistoryStore({
+  file: process.env.DSH_CURATOR_HISTORY || undefined,
+  log: (level, message) => console.log(`[${level}] ${message}`)
+})
 
 /**
  * @param {object} ctx - cordis 上下文（settings/tools 注入）。
- * @param {object} config - composition 补丁配置（可含 skillsRoot）。
+ * @param {object} config - composition 补丁配置（可含 skillsRoot / historyPath）。
  */
 export function apply(ctx, config = {}) {
   const settings = createSettings(ctx, config)
+  // patch config.historyPath 覆盖历史文件路径时，重指向（模块单例已按默认
+  // 路径加载；覆盖仅影响后续 record 的落盘位置——罕见用法，文档标注即可）。
+  if (config.historyPath && reviewLog.path !== config.historyPath) {
+    ctx.logger.info('skill-curator: historyPath override is applied on next process start (current file keeps loading)')
+  }
 
   // ---------------------------------------------------------------------
   // 工具注册：skill-library-*（全局注册；语义无害，只写插件自有/收养的 skill）
