@@ -87,8 +87,16 @@ export function apply(ctx, config = {}) {
       .then(async () => {
         const s = settings.spec()
         const events = agent.session && agent.session.events ? [...agent.session.events] : []
-        if (events.length === 0) return
         const { text, stats } = buildDigest(events, { tail: s.digestTail })
+        // 无实质对话内容（events 全为 tool/plugin/系统事件）时不起评审
+        if (stats.total === 0) {
+          ctx.logger.info(
+            'skill-curator: review skipped for %s (no user/model turns in %d events)',
+            agent.session && agent.session.id,
+            events.length
+          )
+          return
+        }
         const digestText = truncateDigest(text, s.digestMaxChars)
         const prompt = buildReviewPrompt({ digestText, focus })
         ctx.logger.info(

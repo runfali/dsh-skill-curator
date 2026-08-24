@@ -235,6 +235,43 @@ test('enabled=false suppresses trigger; interval change applies live', async () 
   assert.equal(started.length, 1, 'interval change applied to live agent')
 })
 
+test('empty-status session (no user/model turns) never spawns review', async () => {
+  const started = []
+  const env = makeCtx()
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider(n) { return n === 'spawn' ? { name: n } : undefined },
+        list: () => ['spawn'],
+        async start(provider, request) {
+          started.push(request)
+          return { result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  apply(env, { skillNudgeInterval: 1 })
+  const t = env.__test
+  // 会话 events 只有 tool 结果与插件注入，没有 user/model 回合
+  const session = {
+    id: 'sess-empty',
+    header: {},
+    events: [
+      { type: 'tool/result', data: { message: { content: [] } } },
+      { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'x' }, content: [{ type: 'text', text: '系统提醒' }] } },
+      { type: 'turn/start', data: { turn: 1 } }
+    ]
+  }
+  const agent = { id: 'sess-empty', session, ctx: env.createAgentCtx({}) }
+  await emitOn(t.listeners, 'agent/created', { agent })
+  const cbs = t.agentCtxs[0].listeners.get('agent/turn-stopping')
+  for (const cb of cbs) await cb({ turn: 1 })
+  for (const cb of cbs) await cb({ turn: 2 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(started.length, 0, 'no review for content-less session')
+})
+
 test('mutual exclusion: concurrent triggers are skipped', async () => {
   let release
   const gate = new Promise((resolve) => { release = resolve })
