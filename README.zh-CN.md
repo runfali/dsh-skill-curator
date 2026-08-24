@@ -46,12 +46,19 @@ dsh plugin --profile web add ./
 
 标准 bundle 插件，装/卸后重启生效；全程不改 dsh 源码。
 
-## 设置项（设置页 · 技能策展卡片）
+## 设置项（设置页 · 插件页签 · 「技能策展」卡片）
 
 - **enabled** 总开关（默认开）
 - **skillNudgeInterval** 触发间隔（默认 3 轮）
-- **notifyMode** off=静默 / on=宿主日志摘要 / verbose=含内容预览
+- **notifyMode** off=静默 / on=宿主日志摘要 / verbose=含内容预览（分段按钮）
 - **reviewProvider / reviewModel** 评审子代理模型覆盖（留空 = 跟随主会话当前模型）
+- **reviewBaseUrl / reviewApiKey** 自定义评审端点（OpenAI 兼容 `/chat/completions`）。
+  填了 base_url + 模型后，评审子代理经专用适配器路由跑在该端点（路由名 = `reviewProvider`，
+  缺省 `skill-curator-review`）；端点与凭据每次请求现读设置，改动即时生效无需重启。
+  仅 base_url 为空时忽略 api_key
+- **评审回退**：自定义端点/模型无法工作（HTTP 错误 / 断网 / 鉴权失败 / 限流 / 模型缺失 / 超时）
+  时，自动以主会话模型**重跑一次**（只回退一次）。回退在宿主日志、评审记录与状态面板
+  （「⚠️已回退主模型」）均有标记
 - **reviewTimeoutMs** 评审预算（默认 15 分钟，超时自动终止）
 - **digestTail / digestMaxChars** 摘要形态
 - **adoptSkills** 收养清单（逗号分隔）：允许自动维护的非本插件 skill
