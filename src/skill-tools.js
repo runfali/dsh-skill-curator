@@ -330,13 +330,14 @@ export function createSkillToolDefinitions(getConfig) {
       async (args) => {
         const root = rootOf()
         const name = String(args.name)
-        const rel = String(args.filePath || '')
+        const rel = normalize(String(args.filePath || ''))
         const allowed = ['references/', 'templates/', 'scripts/']
         if (!allowed.some((prefix) => rel.startsWith(prefix))) {
           throw new Error(`filePath must start with one of: ${allowed.join(', ')}`)
         }
+        // 规范化后再验一次前缀（防 references/../x.md 这类 join 归一化绕过）
         const target = join(root, name, rel)
-        assertInside(join(root, name), normalize(target))
+        assertInside(join(root, name), target)
         const md = skillPath(root, name)
         let raw
         try {

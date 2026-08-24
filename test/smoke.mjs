@@ -74,13 +74,12 @@ assert.equal(tools.skillsRoot({}), join(process.env.DSH_HOME, 'skills'), 'DSH_HO
 delete process.env.DSH_HOME
 
 // 8. 计数
-const counter = counters.createCounter(3)
-const fakeAgent = {}
-assert.equal(counter.bump(fakeAgent), false, '1st bump')
-assert.equal(counter.bump(fakeAgent), false, '2nd bump')
-assert.equal(counter.bump(fakeAgent), true, '3rd bump fires')
-assert.equal(counter.bump(fakeAgent), false, 'reset after fire')
-assert.equal(counter.countOf(fakeAgent), 1, 'count continues')
+const counter = counters.createCounter()
+assert.equal(counter.bump(3), false, '1st bump')
+assert.equal(counter.bump(3), false, '2nd bump')
+assert.equal(counter.bump(3), true, '3rd bump fires')
+assert.equal(counter.bump(3), false, 'reset after fire')
+assert.equal(counter.countOf(), 1, 'count continues')
 
 // 9. 事件形状
 const evts = [

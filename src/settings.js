@@ -29,7 +29,7 @@ export const Config = z.object({
   /** 用户显式收养（允许插件更新）的 skill 名清单。 */
   adoptSkills: z.array(z.string()).default([]),
   /** 通知模式：off=静默 / on=宿主日志摘要 / verbose=日志含内容预览。 */
-  notifyMode: z.union([z.const('off'), z.const('on'), z.const('verbose')]).default('on')
+  notifyMode: z.union(['off', 'on', 'verbose']).default('on')
 })
 
 /**

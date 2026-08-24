@@ -19,6 +19,9 @@
  *   - 回调里不往父会话注入任何事件（防污染会话历史与记忆）；
  *   - 评审异步执行，与主线完全解耦。
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { createSettings } from './settings.js'
 import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
@@ -31,6 +34,15 @@ export const name = 'skill-curator'
 
 /** 需要这些服务就绪再 apply。 */
 export const inject = ['settings', 'tools']
+
+/** 插件版本（读自 package.json，状态接口回显用）。 */
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version || '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 /** 宿主侧状态（评审记录，供状态接口/日志）。 */
 export const reviewLog = createReviewLog()
@@ -57,7 +69,6 @@ export function apply(ctx, config = {}) {
   // 触发：agent/created → agent 级 turn-stopping 计数
   // ---------------------------------------------------------------------
   const running = new WeakSet() // 同会话互斥：一次只跑一个评审
-  const counters = new WeakMap() // agent -> counter
 
   /**
    * 异步后台评审（不阻塞调用方；全异常兜底，绝不炸主线）。
@@ -103,9 +114,15 @@ export function apply(ctx, config = {}) {
           const headline = actions.length > 0
             ? `💾 Skill review: ${actions.join(' · ')}`
             : '💾 Skill review: 无需保存'
-          ctx.logger.info('skill-curator: %s (session=%s)', headline, agent.session && agent.session.id)
+          const line = `skill-curator: ${headline} (session=${agent.session && agent.session.id})`
+          // 双通道：ctx.logger 进结构化日志；console.log 直出宿主 stdout
+          //（dsh 的 LoggerService 默认不透出 info 级别到 stdout）
+          ctx.logger.info(line)
+          console.log(line)
           if (notify === 'verbose' && out.summary) {
-            ctx.logger.info('skill-curator: [detail] %s', out.summary.slice(0, 2000))
+            const detail = `skill-curator: [detail] ${out.summary.slice(0, 2000)}`
+            ctx.logger.info(detail)
+            console.log(detail)
           }
         }
       })
@@ -121,17 +138,24 @@ export function apply(ctx, config = {}) {
       .finally(done)
   }
 
-  ctx.on('agent/created', ({ agent }) => {
+  // 全局监听 agent/created（载荷带 agent，实测确认），在 agent 级 scoped ctx 上注册
+  // turn-stopping——其运行时载荷仅有 {turn, signal}，没有 agent 字段（实现与 d.ts 漂移），
+  // 会话标识从闭包拿。cordis 的 on 第三参数是过滤器，绝不能当 label 传。
+  ctx.effect(() => ctx.on('agent/created', (payload) => {
+    const agent = payload && payload.agent
     if (!agent || !agent.ctx || !agent.session) return
-    if (agent.session.header && agent.session.header.origin === 'subagent') return
-    const counter = createCounter(settings.spec().skillNudgeInterval)
-    counters.set(agent, counter)
+    const header = agent.session.header || {}
+    // 评审子代理自身不参与触发（双保险：origin 标记 + 委派深度）
+    if (header.origin === 'subagent') return
+    if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return
+    const counter = createCounter()
     agent.ctx.on('agent/turn-stopping', () => {
       try {
-        if (!settings.spec().enabled) return
+        const s = settings.spec()
+        if (!s.enabled) return
         let fired = false
         try {
-          fired = counter.bump(agent)
+          fired = counter.bump(s.skillNudgeInterval)
         } catch {
           fired = false
         }
@@ -139,8 +163,8 @@ export function apply(ctx, config = {}) {
       } catch (error) {
         ctx.logger.warn('skill-curator: turn-stopping handler error: %s', (error && error.message) || error)
       }
-    }, 'skill-curator: turn trigger')
-  }, 'skill-curator: agent track')
+    })
+  }), 'skill-curator: agent track')
 
   // ---------------------------------------------------------------------
   // 手动命令：/skill-refine [focus]
@@ -169,15 +193,38 @@ export function apply(ctx, config = {}) {
   // ---------------------------------------------------------------------
   const webServer = ctx.get('webServer')
   if (webServer !== undefined) {
+    // 同源守卫（对齐 dsh-config-center 先例）：/api 信任围栏校验 Host/Origin
+    const LOOPBACK = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i
+    const sameOrigin = (req) => {
+      const host = String(req.headers && (req.headers.host || req.headers.Host) || '')
+      if (!LOOPBACK.test(host)) return false
+      const origin = req.headers && (req.headers.origin || req.headers.Origin)
+      if (!origin) return true // 同源 GET 可能不带 Origin
+      try {
+        return LOOPBACK.test(new URL(String(origin)).host)
+      } catch {
+        return false
+      }
+    }
     webServer.register({
       kind: 'exact',
       path: '/api/skill-curator/status',
       handler: async (req, res) => {
         try {
+          if (!sameOrigin(req)) {
+            res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ ok: false, error: 'forbidden: cross-origin' }))
+            return
+          }
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            res.writeHead(405, { allow: 'GET' })
+            res.end('method not allowed')
+            return
+          }
           const body = JSON.stringify({
             ok: true,
             name,
-            version: '0.1.0',
+            version: VERSION,
             enabled: settings.spec().enabled,
             interval: settings.spec().skillNudgeInterval,
             reviews: reviewLog.recent().slice(0, 10)

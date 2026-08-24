@@ -23,14 +23,14 @@ export function messageText(content) {
   return texts.join('\n').trim()
 }
 
-/** 事件是否真人输入。 */
+/** 事件是否真人输入（plugin 注入的 user 角色不算——source.kind 必须是 'user'）。 */
 export function isUserMessage(event) {
   return (
     event &&
     event.type === 'user/message' &&
     event.data &&
     event.data.source &&
-    (event.data.source.kind === 'user' || event.data.source.kind === 'model_feedback')
+    event.data.source.kind === 'user'
   )
 }
 

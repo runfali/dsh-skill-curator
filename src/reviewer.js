@@ -30,6 +30,24 @@ export function createReviewLog() {
 }
 
 /**
+ * 解析评审用的子代理 provider 名：优先 'spawn'（dsh-base 默认注册），
+ * 不在时回退到第一个可用 provider；一个都没有则抛错。
+ */
+function resolveProvider(subagents) {
+  try {
+    if (typeof subagents.getProvider === 'function' && subagents.getProvider('spawn')) return 'spawn'
+    if (typeof subagents.list === 'function') {
+      const names = subagents.list() || []
+      if (names.includes('spawn')) return 'spawn'
+      if (names.length > 0) return names[0]
+    }
+  } catch {
+    // 注册表不可用时按默认名走，让 start 给出权威报错
+  }
+  return 'spawn'
+}
+
+/**
  * 起一个评审子代理并等待结果。
  *
  * @param {object} ctx - cordis 上下文（须含 subagents/tools）。
@@ -45,6 +63,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, label = 'skill 
   if (subagents === undefined) {
     throw new Error('subagents service unavailable')
   }
+  const provider = resolveProvider(subagents)
   const controller = new AbortController()
   const timeoutMs = Number((spec && spec.reviewTimeoutMs) || 900000)
   const timer = setTimeout(() => controller.abort(new Error('skill review timeout')), timeoutMs)
@@ -64,38 +83,24 @@ export async function runSkillReview(ctx, agent, { prompt, spec, label = 'skill 
     request.agentOptions = { provider: reviewProvider, model: reviewModel }
   }
 
-  let run
+  // settleRun 内部会 await run.result 并 dispose（永不 reject，失败转 status）。
+  // 注意其返回是 jobs outcome 形状：{status:'completed'|'killed'|'failed',
+  // output?: string(finalText), detail?} —— 不是 SubagentResult（无 stopReason）。
+  let outcome
   try {
-    run = await subagents.start('spawn', request)
-  } catch (error) {
+    outcome = await settleRun(await subagents.start(provider, request))
+  } finally {
     clearTimeout(timer)
-    throw error
   }
-
-  try {
-    const result = await settleRun(run)
-    clearTimeout(timer)
-    const output = result.output || []
-    const summary = output
-      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
-    const isNothing = /无需保存|nothing to save/i.test(summary)
-    return {
-      ok: result.stopReason === 'completed',
-      stopReason: result.stopReason,
-      diagnostic: result.diagnostic || '',
-      summary,
-      actions: isNothing ? [] : [summary]
-    }
-  } catch (error) {
-    clearTimeout(timer)
-    try {
-      await run.dispose()
-    } catch {
-      // dispose 失败不掩盖原始错误
-    }
-    throw error
+  const ok = outcome && outcome.status === 'completed'
+  const summary = (typeof (outcome && outcome.output) === 'string' ? outcome.output : '').trim()
+  const diagnostic = String((outcome && outcome.detail) || '')
+  const isNothing = /无需保存|nothing to save/i.test(summary)
+  return {
+    ok,
+    stopReason: outcome ? outcome.status : 'unknown',
+    diagnostic,
+    summary,
+    actions: isNothing || !ok ? [] : [summary]
   }
 }
