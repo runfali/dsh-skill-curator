@@ -141,10 +141,12 @@ for (const k of fieldKeys) {
 ok('locale parity + all field labels/hints')
 
 // ---- 渲染树真实执行（默认折叠态也要执行子组件路径）----
+// 契约：注册的 hooks 键转成 use<Name> observable hook（selector 形式）
+const makeUseCurator = (store) => (selector) => selector(store.getSnapshot())
 const store = injected.hooks.curator
 const tree = makeElement(Component, {
   t: (key) => dict.zh[key] || key,
-  hooks: { curator: store },
+  useCurator: makeUseCurator(store),
   ...injected
 })
 renderTree(tree)
@@ -194,7 +196,7 @@ const ctxStub2 = {
 }
 captured2.apply(ctxStub2)
 const injected2Actions = registered.inject2()
-const tree2 = makeElement(registered.Component2, { t: (key) => dict.zh[key] || key, hooks: { curator: injected2Actions.hooks.curator }, ...injected2Actions })
+const tree2 = makeElement(registered.Component2, { t: (key) => dict.zh[key] || key, useCurator: makeUseCurator(injected2Actions.hooks.curator), ...injected2Actions })
 renderTree(tree2)
 assert.ok(renderedTags.includes('input'), 'expanded: inputs rendered')
 assert.ok(renderedTags.includes('select'), 'expanded: select rendered (enum field)')

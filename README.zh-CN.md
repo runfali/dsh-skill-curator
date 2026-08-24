@@ -41,7 +41,7 @@
 ```bash
 cd /path/to/dsh-skill-curator
 dsh plugin --profile web add ./
-# 重启 dsh，然后在 设置 → 技能策展 里启用
+# 重启 dsh，然后在 设置 → 插件 页签 → 「技能策展（Skill Curator）」卡片 里启用
 ```
 
 标准 bundle 插件，装/卸后重启生效；全程不改 dsh 源码。

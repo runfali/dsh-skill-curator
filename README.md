@@ -43,7 +43,7 @@ Behavioral parity matrix: [docs/COMPARISON.md](docs/COMPARISON.md).
 ```bash
 cd /path/to/dsh-skill-curator
 dsh plugin --profile web add ./
-# restart dsh, then enable it in Settings → skill-curator
+# restart dsh, then open: Settings → Plugins tab → "Skill Curator" card
 ```
 
 Skip the restart? The plugin only takes effect on next start (standard bundle plugin; no dsh source changes, ever).
