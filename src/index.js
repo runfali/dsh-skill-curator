@@ -106,7 +106,12 @@ export function apply(ctx, config = {}) {
           stats.compressed,
           digestText.length
         )
-        const out = await runSkillReview(ctx, agent, { prompt, spec: s })
+        const out = await runSkillReview(ctx, agent, {
+          prompt,
+          spec: s,
+          // 自定义端点 adapter 每次请求现读设置（热改即时生效）
+          getSpec: () => settings.spec()
+        })
         const actions = out.actions || []
         reviewLog.record({
           at: new Date().toISOString(),
@@ -115,14 +120,16 @@ export function apply(ctx, config = {}) {
           stopReason: out.stopReason,
           actions,
           summary: out.summary,
-          diagnostic: out.diagnostic || undefined
+          diagnostic: out.diagnostic || undefined,
+          fallback: out.fallback
         })
         const notify = String(s.notifyMode || 'on')
         if (notify !== 'off') {
           const headline = actions.length > 0
             ? `💾 Skill review: ${actions.join(' · ')}`
             : '💾 Skill review: 无需保存'
-          const line = `skill-curator: ${headline} (session=${agent.session && agent.session.id})`
+          const fallbackMark = out.fallback ? ' [已回退主模型]' : ''
+          const line = `skill-curator: ${headline}${fallbackMark} (session=${agent.session && agent.session.id})`
           // 双通道：ctx.logger 进结构化日志；console.log 直出宿主 stdout
           //（dsh 的 LoggerService 默认不透出 info 级别到 stdout）
           ctx.logger.info(line)

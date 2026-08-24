@@ -133,7 +133,7 @@ const dict = registered.locales[0].dict
 const zhKeys = Object.keys(dict.zh)
 const enKeys = Object.keys(dict.en)
 assert.deepEqual(enKeys.sort(), zhKeys.sort(), 'zh/en key parity')
-const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'adoptSkills', 'notifyMode']
+const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'reviewBaseUrl', 'reviewApiKey', 'adoptSkills', 'notifyMode']
 for (const k of fieldKeys) {
   assert.ok(zhKeys.includes('field.' + k), `field.${k} label`)
   assert.ok(zhKeys.includes('hint.' + k), `hint.${k} hint`)

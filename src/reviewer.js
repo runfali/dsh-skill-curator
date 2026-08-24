@@ -6,13 +6,51 @@
  * 作为它的唯一输入，并用 toolFilter 白名单把它限制为只能调用
  * skill-library-* 工具（工具级等价 hermes 的运行时白名单）。
  *
+ * 模型覆盖与回退（发哥要求）：
+ *   - reviewBaseUrl + reviewModel（自定义端点，OpenAI 兼容）→ 专用 adapter
+ *     路由；reviewProvider + reviewModel（已注册路由）→ 直接 agentOptions；
+ *     均空 → 跟随父会话模型。
+ *   - 自定义端点/覆盖模型**无法工作**（端点 HTTP/网络/鉴权/模型缺失/超时）
+ *     → 自动回退：去掉 agentOptions 以父会话模型重跑一次（只回退一次），
+ *     结果带 fallback 标记（日志与状态面板可见）。
+ *
  * 隔离设计：
  *   - 评审子代理是独立 session，绝不往父会话写任何事件（无污染）；
  *   - 摘要而非全量会话注入（控制成本）；
- *   - 超时兜底 dispose；父 agent 已释放（agent/disposed）时不再回显。
+ *   - 每次尝试独立超时兜底；settleRun 永不 reject（失败转 status）。
  */
 import { settleRun } from '@deepseek-ai/dsh-subagent'
 import { TOOL_NAMES } from './skill-tools.js'
+import { createCustomAdapter } from './custom-adapter.js'
+
+/** 自定义端点默认 provider 路由名（设置 reviewProvider 非空时用之）。 */
+export const CUSTOM_REVIEW_ROUTE = 'skill-curator-review'
+
+/** 自定义端点 adapter 注册缓存：route -> adapter 实例（凭据每请求读 settings）。 */
+const customAdapters = new Map() // route -> adapter
+
+/**
+ * 确保自定义端点 adapter 已注册到 llm 服务。
+ * 幂等：同名路由已注册则复用；llm 服务缺失时抛错（评审前由调用方兜底）。
+ * @param {object} ctx - cordis 上下文。
+ * @param {string} route - provider 路由名。
+ * @param {() => object} getSpec - 当前设置快照读取器（adapter 每次 stream 现读）。
+ */
+export function ensureCustomAdapter(ctx, route, getSpec) {
+  if (customAdapters.has(route)) return
+  const llm = ctx.get('llm')
+  if (llm === undefined || typeof llm.registerAdapter !== 'function') {
+    throw new Error('llm service unavailable — cannot register custom review endpoint')
+  }
+  const adapter = createCustomAdapter(getSpec, route)
+  customAdapters.set(route, adapter)
+  try {
+    llm.registerAdapter([route], adapter)
+  } catch (error) {
+    customAdapters.delete(route)
+    throw error
+  }
+}
 
 /** 评审运行状态（供状态面板/日志）。 */
 export function createReviewLog() {
@@ -48,50 +86,99 @@ function resolveProvider(subagents) {
 }
 
 /**
- * 起一个评审子代理并等待结果。
+ * 判定失败是否属于「端点/模型层」问题（值得回退主模型）。
+ * 特征：自定义端点错误前缀、网络错误码、HTTP 状态、鉴权/限流/模型缺失。
+ * @param {unknown} errorOrDetail - start 抛错信息或 settleRun 的 detail。
+ */
+export function isEndpointModelFailure(errorOrDetail) {
+  const text = String(errorOrDetail || '')
+  return /custom review endpoint|review endpoint|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EPIPE|EHOSTUNREACH|HTTP \d{3}|unauthorized|invalid api|401|403|404|429|too many requests|model[^\n]{0,40}not found|no such model/i.test(text)
+}
+
+/**
+ * 单次评审尝试：起子代理并 settle（永不 reject；start 抛错向上传）。
+ * 每次尝试独立 AbortController + 超时预算。
+ */
+async function runOnce(subagents, provider, request, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('skill review timeout')), timeoutMs)
+  try {
+    return await settleRun(await subagents.start(provider, { ...request, signal: controller.signal }))
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 起一个评审子代理并等待结果（含自定义端点失败回退主模型）。
  *
- * @param {object} ctx - cordis 上下文（须含 subagents/tools）。
+ * @param {object} ctx - cordis 上下文（须含 subagents；自定义端点时含 llm）。
  * @param {object} agent - 触发评审的父 agent（live）。
  * @param {object} opts
  * @param {string} opts.prompt - 完整评审消息（摘要 + 指令）。
  * @param {object} opts.spec - 当前设置快照。
+ * @param {() => object} opts.getSpec - 设置读取器（自定义 adapter 现读端点/凭据）。
  * @param {string} [opts.label='skill review'] - 子代理显示标签。
- * @returns {Promise<object>} { ok, summary, actions, diagnostic, stopReason }
+ * @returns {Promise<object>} { ok, summary, actions, diagnostic, stopReason, fallback? }
  */
-export async function runSkillReview(ctx, agent, { prompt, spec, label = 'skill review' }) {
+export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () => spec, label = 'skill review' }) {
   const subagents = ctx.get('subagents')
   if (subagents === undefined) {
     throw new Error('subagents service unavailable')
   }
   const provider = resolveProvider(subagents)
-  const controller = new AbortController()
   const timeoutMs = Number((spec && spec.reviewTimeoutMs) || 900000)
-  const timer = setTimeout(() => controller.abort(new Error('skill review timeout')), timeoutMs)
 
-  const request = {
+  const baseRequest = {
     label,
     prompt: [{ type: 'text', text: prompt }],
     parent: agent,
-    signal: controller.signal,
     // 白名单：子代理只能看到/执行 skill 工具（hermes 运行时白名单等价物）
     toolFilter: { allow: TOOL_NAMES }
   }
-  // 评审模型覆盖（设置里配了 provider+model 才传；空 = 继承父会话运行时）
+
+  // 模型覆盖判定：
+  //  - 自定义端点：reviewBaseUrl + reviewModel（+ reviewApiKey 可选）→ adapter 路由
+  //  - 已注册路由：reviewProvider + reviewModel → agentOptions 直传
+  //  - 均空 → 跟随父会话
   const reviewProvider = String((spec && spec.reviewProvider) || '').trim()
   const reviewModel = String((spec && spec.reviewModel) || '').trim()
-  if (reviewProvider && reviewModel) {
-    request.agentOptions = { provider: reviewProvider, model: reviewModel }
+  const reviewBaseUrl = String((spec && spec.reviewBaseUrl) || '').trim()
+  const custom = Boolean(reviewBaseUrl && reviewModel)
+
+  const overrideRequest = { ...baseRequest }
+  if (custom) {
+    const route = reviewProvider || CUSTOM_REVIEW_ROUTE
+    ensureCustomAdapter(ctx, route, getSpec)
+    overrideRequest.agentOptions = { provider: route, model: reviewModel }
+  } else if (reviewProvider && reviewModel) {
+    overrideRequest.agentOptions = { provider: reviewProvider, model: reviewModel }
   }
 
-  // settleRun 内部会 await run.result 并 dispose（永不 reject，失败转 status）。
-  // 注意其返回是 jobs outcome 形状：{status:'completed'|'killed'|'failed',
-  // output?: string(finalText), detail?} —— 不是 SubagentResult（无 stopReason）。
+  // 第一次尝试（可能带模型覆盖）
   let outcome
+  let fallbackReason = null
   try {
-    outcome = await settleRun(await subagents.start(provider, request))
-  } finally {
-    clearTimeout(timer)
+    outcome = await runOnce(subagents, provider, overrideRequest, timeoutMs)
+  } catch (error) {
+    // start 抛错：provider 拒绝 / 模型解析失败等
+    const message = String((error && error.message) || error)
+    if (custom && isEndpointModelFailure(message)) {
+      fallbackReason = message
+    } else {
+      throw error
+    }
   }
+  // settleRun 失败：端点错误 / 超时杀停
+  if (fallbackReason === null && outcome && outcome.status !== 'completed' && custom && isEndpointModelFailure(outcome.detail || '')) {
+    fallbackReason = String(outcome.detail || outcome.status)
+  }
+
+  // 回退：去掉模型覆盖，以父会话模型重跑一次（只回退一次）
+  if (fallbackReason !== null) {
+    outcome = await runOnce(subagents, provider, baseRequest, timeoutMs)
+  }
+
   const ok = outcome && outcome.status === 'completed'
   const summary = (typeof (outcome && outcome.output) === 'string' ? outcome.output : '').trim()
   const diagnostic = String((outcome && outcome.detail) || '')
@@ -101,6 +188,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, label = 'skill 
     stopReason: outcome ? outcome.status : 'unknown',
     diagnostic,
     summary,
-    actions: isNothing || !ok ? [] : [summary]
+    actions: isNothing || !ok ? [] : [summary],
+    ...(fallbackReason !== null ? { fallback: { reason: fallbackReason.slice(0, 300) } } : {})
   }
 }
