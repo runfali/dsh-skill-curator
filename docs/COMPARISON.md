@@ -18,6 +18,8 @@
 | 结果回显 | `💾 Self-improvement review: …` 经 background_review_callback | 宿主日志 `💾 Skill review: …` + 设置卡「最近评审」面板（GET /api/skill-curator/status） | 都不往父会话注入事件（防污染） |
 | 失败兜底 | 全 try/catch + 记账 attribut | 全异常兜底 + reviewLog 记录 + 互斥锁防并发 | 评审失败绝不影响主线 |
 | 成本控制 | max_iterations=16、cache 复用 | 摘要字符上限（默认 30K）+ 超时预算（默认 15 分钟） | DSH 子代理迭代预算由平台管理 |
+| 模型覆盖 | `auxiliary.background_review.{provider,model}`（已注册路由）+ aux 路由时 digest 化 | reviewProvider/reviewModel（已注册路由直传 agentOptions）；**reviewBaseUrl/reviewApiKey**（自定义 OpenAI 兼容端点 → 插件注册专用 adapter 路由，凭据每请求现读设置，热改免重注册） | DSH AgentOptions 无端点字段，自定义端点必须走 llm.registerAdapter |
+| 失败回退 | 无（aux 失败即失败） | 自定义端点/模型无法工作（HTTP/网络/鉴权/限流/模型缺失/超时 killed）→ 自动**去掉模型覆盖以主会话模型重跑一次**；非端点失败不重试；回退标记进日志/评审记录/状态面板 | 发哥要求：自定义模型挂了不能让评审跟着挂 |
 
 ## 平台约束与实现注记
 

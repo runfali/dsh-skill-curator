@@ -13,7 +13,11 @@
  * StreamChunk 协议（block-start → deltas → block-end → finish），并正确
  * 表达模型发起的工具调用（tool-call 块），使评审子代理的 skill-library-*
  * 工具链路可用。
+ *
+ * 归因契约：每个 provider 请求必须携带 attributionHeaders()（user-agent，
+ * dsh-llm 导出；省略无法抑制归因）。
  */
+import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 
 /** 消息内容块 → OpenAI content 文本（text/tool-result 等非图块）。 */
 export function blocksToOpenAiText(content) {
@@ -124,6 +128,7 @@ export function createCustomAdapter(getSpec, route) {
         headers: {
           'content-type': 'application/json',
           accept: 'application/json',
+          ...attributionHeaders(),
           ...(c.apiKey ? { authorization: `Bearer ${c.apiKey}` } : {})
         },
         body: JSON.stringify(payload),

@@ -200,3 +200,30 @@ test('reviewLog bounds at 50', () => {
   for (let i = 0; i < 60; i++) log.record({ at: String(i) })
   assert.equal(log.recent().length, 50)
 })
+test('killed (timeout) on custom endpoint falls back even with empty detail', async () => {
+  const subagents = {
+    getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
+    async start(provider, request) {
+      // 真实链路：超时 abort 后 SubagentResult.stopReason='aborted'，settleRun 映射为 status:'killed'
+      if (request.agentOptions) return { result: Promise.resolve({ output: [], stopReason: 'aborted' }), dispose: async () => {} }
+      return completedRun('主模型兜底完成')
+    }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm1' }), getSpec: () => spec() })
+  assert.equal(out.ok, true)
+  assert.ok(out.fallback && /killed/.test(out.fallback.reason), 'fallback recorded for killed')
+})
+
+test('custom adapter sends attribution user-agent header', async () => {
+  const realFetch = globalThis.fetch
+  let headers = null
+  globalThis.fetch = async (url, init) => { headers = init.headers; return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'x' }, finish_reason: 'stop' }] }) } }
+  try {
+    const adapter = createCustomAdapter(() => ({ reviewBaseUrl: 'http://h/v1', reviewApiKey: '', reviewModel: 'm' }), 'r')
+    for await (const _ of adapter.stream({ provider: 'r', model: 'm', messages: [] })) { /* drain */ }
+    assert.match(headers['user-agent'], /^deepseek-harness\//)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})

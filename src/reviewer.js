@@ -169,9 +169,13 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
       throw error
     }
   }
-  // settleRun 失败：端点错误 / 超时杀停
-  if (fallbackReason === null && outcome && outcome.status !== 'completed' && custom && isEndpointModelFailure(outcome.detail || '')) {
-    fallbackReason = String(outcome.detail || outcome.status)
+  // settleRun 失败：端点错误 / 超时杀停。
+  // killed（超时 abort）在自定义端点下直接视为端点问题（慢/挂起）→ 回退；
+  // failed 需 detail 命中端点/模型特征才回退（非端点失败不重试）。
+  if (fallbackReason === null && outcome && outcome.status !== 'completed' && custom) {
+    if (outcome.status === 'killed' || isEndpointModelFailure(outcome.detail || '')) {
+      fallbackReason = String(outcome.detail || outcome.status)
+    }
   }
 
   // 回退：去掉模型覆盖，以父会话模型重跑一次（只回退一次）
