@@ -64,8 +64,10 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 - **reviewProvider / reviewModel** — optional review subagent model override (empty = follow the session's current model)
 - **reviewBaseUrl / reviewApiKey** — optional custom review endpoint (OpenAI-compatible `/chat/completions`). When `reviewBaseUrl` + `reviewModel` are set, the review subagent runs against that endpoint through a dedicated adapter route (provider name = `reviewProvider`, or `skill-curator-review` by default). Settings are read live on every request — no restart needed
 - **Review history** persists to `~/.dsh/skill-curator/reviews.json` (last 50 entries) — survives plugin removal/reinstall and restarts
-- **Review fallback** — if the custom endpoint/model fails (HTTP/network/auth/rate-limit/model missing/timeout), the review automatically retries **once** on the session's own model. The fallback is marked in the host log, the review log, and the status panel (`⚠️已回退主模型`)
+- **Review resilience** — two layers for endpoint/model failures (HTTP/network/auth/rate-limit/model missing/timeout): ① if the custom endpoint fails, the review retries **once** on the session's own model (marked `⚠️已回退主模型` in host log / review log / status panel); ② if the final attempt then dies on an endpoint-class error or a detail-less `killed`, it retries up to `reviewRetryCount` times with `reviewRetryDelayMs` backoff — a model connection blip no longer loses the review. Tool-layer errors are never retried
 - **reviewTimeoutMs** — review subagent budget (default 15 min)
+- **reviewRetryCount** — extra retries when the final review attempt dies on endpoint/model-layer failures (connection reset, HTTP errors, timeouts) or a detail-less `killed`; `0` disables retrying. Tool-layer errors are never retried. Default 1
+- **reviewRetryDelayMs** — backoff base for retries, n-th retry waits `base × n` ms (default 5000)
 - **digestTail / digestMaxChars** — digest shape
 - **adoptSkills** — comma-separated names of skills the curator may maintain although created elsewhere
 
