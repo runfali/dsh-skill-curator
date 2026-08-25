@@ -255,7 +255,7 @@ export function apply(ctx, config = {}) {
             version: VERSION,
             enabled: settings.spec().enabled,
             interval: settings.spec().skillNudgeInterval,
-            reviews: reviewLog.recent().slice(0, 10)
+            reviews: reviewLog.recent().slice(0, 5)
           })
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           res.end(body)
