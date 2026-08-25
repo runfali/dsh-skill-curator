@@ -22,6 +22,10 @@ export const Config = z.object({
   digestMaxChars: z.number().step(1).min(2000).max(200000).default(30000),
   /** 评审子代理运行超时（毫秒）。 */
   reviewTimeoutMs: z.number().step(1).min(30000).max(3600000).default(900000),
+  /** 评审最终尝试因端点/模型层瞬断失败后的额外重试次数（0=不重试）。 */
+  reviewRetryCount: z.number().step(1).min(0).max(5).default(1),
+  /** 重试退避基数（毫秒），第 n 次重试延迟 = 基数 × n。 */
+  reviewRetryDelayMs: z.number().step(1).min(0).max(60000).default(5000),
   /** 评审模型覆盖 provider；空 = 跟随父会话当前模型（自定义端点时作路由名）。 */
   reviewProvider: z.string().default(''),
   /** 评审模型覆盖 model；空 = 跟随父会话当前模型。 */

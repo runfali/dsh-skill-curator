@@ -215,6 +215,70 @@ test('killed (timeout) on custom endpoint falls back even with empty detail', as
   assert.ok(out.fallback && /killed/.test(out.fallback.reason), 'fallback recorded for killed')
 })
 
+test('session-model connection blip (killed) is retried and succeeds', async () => {
+  // 发哥场景：评审跟随主模型时主模型瞬断 → 重试一次后成功
+  let calls = 0
+  const subagents = {
+    getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
+    async start(provider, request) {
+      calls += 1
+      if (calls === 1) return { result: Promise.resolve({ output: [], stopReason: 'aborted', diagnostic: '' }), dispose: async () => {} }
+      return completedRun('重试后完成')
+    }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewRetryCount: 1, reviewRetryDelayMs: 0 }), getSpec: () => spec() })
+  assert.equal(out.ok, true)
+  assert.equal(calls, 2)
+  assert.match(out.summary, /重试后完成/)
+})
+
+test('endpoint-class failed outcome is retried up to reviewRetryCount', async () => {
+  let calls = 0
+  const subagents = {
+    getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
+    async start() {
+      calls += 1
+      if (calls <= 2) return { result: Promise.resolve({ output: [], stopReason: 'error', diagnostic: 'fetch failed: ECONNRESET' }), dispose: async () => {} }
+      return completedRun('第三次成功')
+    }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewRetryCount: 2, reviewRetryDelayMs: 0 }), getSpec: () => spec() })
+  assert.equal(out.ok, true)
+  assert.equal(calls, 3)
+})
+
+test('non-endpoint failure is NOT retried', async () => {
+  let calls = 0
+  const subagents = {
+    getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
+    async start() {
+      calls += 1
+      return { result: Promise.resolve({ output: [], stopReason: 'error', diagnostic: 'random plugin bug' }), dispose: async () => {} }
+    }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewRetryCount: 3, reviewRetryDelayMs: 0 }), getSpec: () => spec() })
+  assert.equal(out.ok, false)
+  assert.equal(calls, 1) // 工具层/未知错误不重试
+})
+
+test('reviewRetryCount=0 disables retry entirely', async () => {
+  let calls = 0
+  const subagents = {
+    getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
+    async start() {
+      calls += 1
+      return { result: Promise.resolve({ output: [], stopReason: 'aborted', diagnostic: '' }), dispose: async () => {} }
+    }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewRetryCount: 0, reviewRetryDelayMs: 0 }), getSpec: () => spec() })
+  assert.equal(out.ok, false)
+  assert.equal(calls, 1)
+})
+
 test('custom adapter sends attribution user-agent header', async () => {
   const realFetch = globalThis.fetch
   let headers = null

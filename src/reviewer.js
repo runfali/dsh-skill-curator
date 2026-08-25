@@ -183,6 +183,21 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
     outcome = await runOnce(subagents, provider, baseRequest, timeoutMs)
   }
 
+  // 有限重试：评审跟随/回退到主模型后，主模型的连接类瞬断不再直接终止本次评审
+  // （2026-08-25 发哥要求）。仅对端点/模型层特征或无详情的 killed 重试——
+  // 工具层报错等非端点失败仍不重试，保持既有哲学；次数与退避可配。
+  const retryMax = Math.max(0, Math.trunc(Number((spec && spec.reviewRetryCount) ?? 1)))
+  const retryDelay = Math.max(0, Number((spec && spec.reviewRetryDelayMs) ?? 5000))
+  for (let attempt = 1; attempt <= retryMax; attempt++) {
+    if (!outcome || outcome.status === 'completed') break
+    const detail = String(outcome.detail || '')
+    const retryable = outcome.status === 'killed' || isEndpointModelFailure(detail)
+    if (!retryable) break
+    if (retryDelay > 0) await new Promise((r) => setTimeout(r, retryDelay * attempt))
+    ctx.logger?.info?.(`skill-curator: review retry ${attempt}/${retryMax} after ${outcome.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`)
+    outcome = await runOnce(subagents, provider, baseRequest, timeoutMs)
+  }
+
   const ok = outcome && outcome.status === 'completed'
   const summary = (typeof (outcome && outcome.output) === 'string' ? outcome.output : '').trim()
   const diagnostic = String((outcome && outcome.detail) || '')
