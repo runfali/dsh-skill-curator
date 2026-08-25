@@ -1,5 +1,7 @@
 # dsh-skill-curator — 自动技能策展插件
 
+> **仓库简介**：DeepSeek Harness 自动技能策展插件——后台评审子代理定期复盘对话，自动创建/更新 SKILL.md，让智能体在真实使用中持续自我进化，零侵入、不改 dsh 源码。
+
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 开发的自动技能策展 bundle 插件：每 N 轮真实对话（默认 **3**），后台起一个**评审子代理**阅读会话摘要，主动**创建/更新 `~/.dsh/skills/<name>/SKILL.md`**——把 Nous Research Hermes Agent 的「后台评审自我改进」闭环移植到 DSH，零侵入，不改 dsh 源码。
 
 ## 工作原理
@@ -20,6 +22,10 @@
     ▼
 摘要写入宿主日志 + 设置卡片「最近评审」面板可见
 ```
+
+![后台评审子代理（任务管理面板）](docs/screenshot/0-1.png)
+
+*评审子代理以任务形式出现在右侧「任务管理」面板，图中可见正在排队/空闲的 `skill review` 任务，可实时观察策展全过程。*
 
 手动触发：`/skill-refine [关注点]` 立即对当前会话发起一次评审。
 
@@ -47,6 +53,10 @@ dsh plugin --profile web add ./
 标准 bundle 插件，装/卸后重启生效；全程不改 dsh 源码。
 
 ## 设置项（设置页 · 插件页签 · 「技能策展」卡片）
+
+| 设置卡（上） | 设置卡（下） |
+|:---:|:---:|
+| ![设置卡 1/2](docs/screenshot/0-2.png) | ![设置卡 2/2](docs/screenshot/0-3.png) |
 
 - **enabled** 总开关（默认开）
 - **skillNudgeInterval** 触发间隔（默认 3 轮）

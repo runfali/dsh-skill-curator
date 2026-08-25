@@ -23,6 +23,10 @@ subagent reviews and writes ~/.dsh/skills/<name>/SKILL.md
 summary logged (host journal) + visible in the settings card status panel
 ```
 
+![Backstage review subagent in the Tasks panel](docs/screenshot/0-1.png)
+
+*The review subagent runs as a visible task in the Tasks panel — here you see queued/idle `skill review` entries; open the panel to watch a curation as it happens.*
+
 Manual trigger: `/skill-refine [focus]` runs a review of the current session immediately.
 
 ## Design decisions (vs Hermes)
@@ -49,6 +53,10 @@ dsh plugin --profile web add ./
 Skip the restart? The plugin only takes effect on next start (standard bundle plugin; no dsh source changes, ever).
 
 ## Settings (Settings → Plugins tab → "Skill Curator" card)
+
+| Settings card (part 1) | Settings card (part 2) |
+|:---:|:---:|
+| ![Settings card 1/2](docs/screenshot/0-2.png) | ![Settings card 2/2](docs/screenshot/0-3.png) |
 
 - **enabled** — master switch (default on)
 - **skillNudgeInterval** — turns between reviews (default 3)

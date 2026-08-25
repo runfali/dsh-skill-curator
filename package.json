@@ -1,7 +1,7 @@
 {
   "name": "dsh-skill-curator",
   "version": "0.1.0",
-  "description": "Automatic skill curation for DeepSeek Harness: after every few turns a background subagent reviews the conversation and creates or updates SKILL.md files under the user skills directory. Zero-intrusion bundle plugin; no dsh source changes.",
+  "description": "DeepSeek Harness 自动技能策展插件：后台评审子代理定期复盘对话，自动创建/更新 SKILL.md，让智能体在真实使用中持续自我进化，零侵入、不改 dsh 源码。Automatic skill curation for DeepSeek Harness — a background subagent reviews conversations periodically and creates/updates SKILL.md files; zero-intrusion bundle plugin, no dsh source changes.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
