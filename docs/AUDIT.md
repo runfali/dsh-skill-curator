@@ -51,3 +51,9 @@
 ## 五、处置
 
 无 P0/P1。P2-1/P2-2 建议修复；P3 顺手。修复后按停止线开新一轮复核（换角度：持久化自引用环、并发评审互斥、卸载还原）。
+
+> ## 修复记录（2026-09-01 执行后追加）
+> - **P2-1 已修复**（commit 1c3fc01）：`reviewLog` 改 `export let` + `createReviewLog` 工厂，apply 检测 historyPath 差异即重建 store 立即生效；补回归。
+> - **P2-2 已修复**：计数改 `countersBySession` Map（sessionId 键），agent 重建继承；补回归。
+> - **P2-2 竞态修复**（复盘轮 f149f55）：stale agent disposed 仅在本 agent 首次创建且引用相等时清理，不误删继承计数；补回归。
+> - 复核轮未清零项：P3-1 digest 码元截断（低影响，摘要场景）；P3-2 非流式端点假设（README 已注明）。
