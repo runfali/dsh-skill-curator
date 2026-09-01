@@ -17,12 +17,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.DSH_CURATOR_HISTORY = join(mkdtempSync(join(tmpdir(), 'sc-apply-')), 'reviews.json')
-const { apply, name, reviewLog } = await import('../src/index.js')
+// 注意：reviewLog 是 export let（historyPath 覆盖时 apply 会重建），
+// 解构 import 会快照旧引用——经 mod 延迟读取才是 live binding。
+const mod = await import('../src/index.js')
+const { apply, name } = mod
+const reviewLog = mod.reviewLog
 import { Config } from '../src/settings.js'
 
 /** 手工把 base 与 schema 默认值合并（模拟 settings 解析结果）。 */
@@ -351,4 +355,52 @@ test('/skill-refine command schedules with focus', async () => {
   assert.equal(started.length, 1)
   assert.equal(started[0].provider, 'fork', 'provider fallback when spawn missing')
   assert.ok(started[0].request.prompt[0].text.includes('重点提炼部署流程'), 'focus clause injected')
+})
+
+test('historyPath override rebuilds store immediately (P2-1)', async () => {
+  const env = makeCtx({})
+  const dir = mkdtempSync(join(tmpdir(), 'sc-hist-'))
+  const target = join(dir, 'custom-reviews.json')
+  apply(env, { historyPath: target })
+  // 重建后 path 立即指向覆盖路径（经 mod 读 live binding——reviewLog 是 export let）
+  assert.equal(mod.reviewLog.path, target, 'store path must switch in-process')
+  mod.reviewLog.record({ at: new Date().toISOString(), sessionId: 'x', ok: true, actions: ['a'] })
+  const parsed = JSON.parse(readFileSync(target, 'utf8'))
+  assert.ok(Array.isArray(parsed) && parsed.length >= 1, 'record persisted to override path')
+})
+
+test('turn counter inherited across agent re-creation per sessionId (P2-2)', async () => {
+  const started = []
+  const env = makeCtx({})
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider() { return undefined },
+        list: () => ['spawn'],
+        async start(p, request) {
+          started.push({ provider: p, request })
+          return { result: Promise.resolve({ output: [{ type: 'text', text: '无需保存。' }], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  apply(env, {})
+  const t = env.__test
+  // 第一次 agent：2 轮（不触发）
+  const agent1 = makeAgent(env)
+  await emitOn(t.listeners, 'agent/created', { agent: agent1 })
+  const cb1 = t.agentCtxs.at(-1).listeners.get('agent/turn-stopping') || []
+  assert.equal(cb1.length, 1)
+  for (let i = 0; i < 2; i++) await cb1[0]({ turn: i + 1 })
+  assert.equal(started.length, 0)
+  // agent 重建（同一 sessionId），第 3 轮应立即触发（计数继承）
+  const agent2 = makeAgent(env)
+  agent2.session.id = agent1.session.id // 继承同一 session
+  await emitOn(t.listeners, 'agent/created', { agent: agent2 })
+  const cb2 = t.agentCtxs.at(-1).listeners.get('agent/turn-stopping') || []
+  assert.equal(cb2.length, 1)
+  await cb2[0]({ turn: 3 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(started.length, 1, 'counter inherited → 3rd turn fires review')
 })

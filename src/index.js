@@ -47,13 +47,20 @@ const VERSION = (() => {
 
 /**
  * 宿主侧评审历史（持久化：<DSH_HOME>/skill-curator/reviews.json，patch
- * config.historyPath 可覆盖）。卸载/重装/重启后记录仍在；模块级单例，
- * 启动同步加载（apply 必须同步），record 即落盘。
+ * config.historyPath 可覆盖）。卸载/重装/重启后记录仍在。模块级存储工厂：
+ * 默认路径在模块加载时按环境初始化（apply 必须同步），config.historyPath
+ * 覆盖在 apply 时重建 store 并立即可用（2026-09-01 修复：原实现仅打日志
+ * 提示「下次启动生效」，本进程内覆盖不生效）。
  */
-export const reviewLog = createHistoryStore({
-  file: process.env.DSH_CURATOR_HISTORY || undefined,
-  log: (level, message) => console.log(`[${level}] ${message}`)
-})
+export function createReviewLog(overrideFile) {
+  return createHistoryStore({
+    file: overrideFile || process.env.DSH_CURATOR_HISTORY || undefined,
+    log: (level, message) => console.log(`[${level}] ${message}`)
+  })
+}
+
+/** 默认历史存储（显式覆盖路径时由 apply 重建）。 */
+export let reviewLog = createReviewLog(undefined)
 
 /**
  * @param {object} ctx - cordis 上下文（settings/tools 注入）。
@@ -61,10 +68,11 @@ export const reviewLog = createHistoryStore({
  */
 export function apply(ctx, config = {}) {
   const settings = createSettings(ctx, config)
-  // patch config.historyPath 覆盖历史文件路径时，重指向（模块单例已按默认
-  // 路径加载；覆盖仅影响后续 record 的落盘位置——罕见用法，文档标注即可）。
+  // config.historyPath 覆盖：重建 store（读新路径历史），立即生效——
+  // 原实现只提示「下次启动生效」，覆盖在本进程内不生效（审计 P2-1）。
   if (config.historyPath && reviewLog.path !== config.historyPath) {
-    ctx.logger.info('skill-curator: historyPath override is applied on next process start (current file keeps loading)')
+    reviewLog = createReviewLog(config.historyPath)
+    ctx.logger.info('skill-curator: historyPath override applied → %s (prev %s)', config.historyPath, reviewLog.path)
   }
 
   // ---------------------------------------------------------------------
@@ -169,6 +177,9 @@ export function apply(ctx, config = {}) {
   // 全局监听 agent/created（载荷带 agent，实测确认），在 agent 级 scoped ctx 上注册
   // turn-stopping——其运行时载荷仅有 {turn, signal}，没有 agent 字段（实现与 d.ts 漂移），
   // 会话标识从闭包拿。cordis 的 on 第三参数是过滤器，绝不能当 label 传。
+  // 计数按 sessionId（非 agent 对象）维护：agent 重建（/compact、会话恢复）时继承计数，
+  // 避免触发间隔被重置（审计 P2-2）；agent/disposed 时清理。
+  const countersBySession = new Map()
   ctx.effect(() => ctx.on('agent/created', (payload) => {
     const agent = payload && payload.agent
     if (!agent || !agent.ctx || !agent.session) return
@@ -176,7 +187,12 @@ export function apply(ctx, config = {}) {
     // 评审子代理自身不参与触发（双保险：origin 标记 + 委派深度）
     if (header.origin === 'subagent') return
     if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return
-    const counter = createCounter()
+    const sessionId = agent.session.id
+    let counter = countersBySession.get(sessionId)
+    if (!counter) {
+      counter = createCounter()
+      countersBySession.set(sessionId, counter)
+    }
     agent.ctx.on('agent/turn-stopping', () => {
       try {
         const s = settings.spec()
@@ -191,6 +207,9 @@ export function apply(ctx, config = {}) {
       } catch (error) {
         ctx.logger.warn('skill-curator: turn-stopping handler error: %s', (error && error.message) || error)
       }
+    })
+    agent.ctx.on('agent/disposed', () => {
+      countersBySession.delete(sessionId)
     })
   }), 'skill-curator: agent track')
 
