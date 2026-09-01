@@ -189,9 +189,11 @@ export function apply(ctx, config = {}) {
     if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return
     const sessionId = agent.session.id
     let counter = countersBySession.get(sessionId)
+    let ownsCounter = false
     if (!counter) {
       counter = createCounter()
       countersBySession.set(sessionId, counter)
+      ownsCounter = true
     }
     agent.ctx.on('agent/turn-stopping', () => {
       try {
@@ -209,7 +211,12 @@ export function apply(ctx, config = {}) {
       }
     })
     agent.ctx.on('agent/disposed', () => {
-      countersBySession.delete(sessionId)
+      // 仅当该 session 的计数仍由本 agent 首次创建时清理；
+      // 若重建后的新 agent 已继承（ownsCounter=false），延迟到达的
+      // 旧 agent disposed 不得误删新计数（审计复核 P2-2 边界）。
+      if (ownsCounter && countersBySession.get(sessionId) === counter) {
+        countersBySession.delete(sessionId)
+      }
     })
   }), 'skill-curator: agent track')
 

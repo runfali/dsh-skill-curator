@@ -404,3 +404,41 @@ test('turn counter inherited across agent re-creation per sessionId (P2-2)', asy
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(started.length, 1, 'counter inherited → 3rd turn fires review')
 })
+
+test('stale agent disposed must not drop inherited counter (P2-2 race)', async () => {
+  const started = []
+  const env = makeCtx({})
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider() { return undefined },
+        list: () => ['spawn'],
+        async start(p, request) {
+          started.push({ provider: p, request })
+          return { result: Promise.resolve({ output: [{ type: 'text', text: '无需保存。' }], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  apply(env, {})
+  const t = env.__test
+  // agent1：创建并跑 2 轮（不触发）
+  const agent1 = makeAgent(env)
+  await emitOn(t.listeners, 'agent/created', { agent: agent1 })
+  const cb1 = t.agentCtxs.at(-1).listeners.get('agent/turn-stopping') || []
+  for (let i = 0; i < 2; i++) await cb1[0]({ turn: i + 1 })
+  // agent2 同 session 继承计数
+  const agent2 = makeAgent(env)
+  agent2.session.id = agent1.session.id
+  await emitOn(t.listeners, 'agent/created', { agent: agent2 })
+  // agent1 的 disposed 延迟到达（旧 agent scoped ctx 的监听器）
+  const disp1 = t.agentCtxs.at(-2).listeners.get('agent/disposed') || []
+  assert.ok(disp1.length >= 1, 'agent1 has disposed listener')
+  for (const cb of disp1) await cb({})
+  // 继承计数未被误删：agent2 的第 3 轮应立即触发
+  const cb2 = t.agentCtxs.at(-1).listeners.get('agent/turn-stopping') || []
+  await cb2[0]({ turn: 3 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(started.length, 1, 'stale disposed must not reset inherited counter')
+})
