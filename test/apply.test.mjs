@@ -72,9 +72,17 @@ function makeCtx(config = {}) {
     },
     inject(services, cb) { cb(ctx) },
     settings: {
+      // dsh 0.1.2-alpha.3：宿主 settings provider 暴露 installSection(owner, ns, schema, entry, hooks)，
+      // 语义 = register(base=entry) → setSource(scope.get) → onChange() 同步首发 → scope.watch 持续通知。
+      // （installSettingsSection 独立帮助函数已移除，测试 mock 同步升级。）
+      installSection(owner, ns, schema, entry, hooks) {
+        scopeValue = resolveConfig(schema, entry || config)
+        if (hooks && typeof hooks.setSource === 'function') hooks.setSource(() => scopeValue)
+        if (hooks && typeof hooks.onChange === 'function') hooks.onChange()
+        return { get: () => scopeValue, watch: () => () => {} }
+      },
       register(ns, schema, options) {
         scopeValue = resolveConfig(schema, (options && options.base) || config)
-        // 模拟宿主行为：把解析后的设置读取器交给插件（createSettings 的 setSource）
         if (options && typeof options.setSource === 'function') {
           options.setSource(() => scopeValue)
         }

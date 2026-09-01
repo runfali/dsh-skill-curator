@@ -5,10 +5,10 @@
  * （applies=live，各消费点每 tick 读 current()）。
  */
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
-
-/** Settings 命名空间（浏览器卡片与 host 共用同一字符串）。 */
-export const NS = settingsNamespace('skill-curator')
+/** Settings 命名空间（浏览器卡片与 host 共用同一字符串）。
+ * dsh 0.1.2-alpha 起 settingsNamespace() brand 辅助已从 dsh-settings 移除；
+ * 命名空间改为在 settings.register/installSection 处校验（小写连字符标识符）。 */
+export const NS = 'skill-curator'
 
 /** 设置命名空间的字段模式（也是 Settings 页面渲染/校验的依据）。 */
 export const Config = z.object({
@@ -51,13 +51,21 @@ export const Config = z.object({
  */
 export function createSettings(ctx, config = {}) {
   let current = () => config
-  installSettingsSection(ctx, NS, Config, config, {
-    setSource: (source) => {
-      current = source
-    },
-    onChange: () => {
-      // 各消费点每 tick 读取 current()，无需主动刷新
-    }
+  // dsh 0.1.2-alpha：独立 installSettingsSection 帮助函数已从 dsh-settings 移除，
+  // 同样的接线改为 provider 上的 settings.installSection(owner, ns, schema, entry, hooks)
+  // （源码级核对：register(base=entry) → setSource(scope.get) → 卸载回落 effect →
+  // onChange() 同步首发 → scope.watch 持续通知）。
+  // hooks 在 inject 回调内执行——此处 onChange 为空操作、setSource 只赋值上方
+  // 已声明的 current，无 TDZ 风险，故保持原位置。
+  ctx.inject(['settings'], (sctx) => {
+    sctx.settings.installSection(ctx, NS, Config, config, {
+      setSource: (source) => {
+        current = source
+      },
+      onChange: () => {
+        // 各消费点每 tick 读取 current()，无需主动刷新
+      }
+    })
   })
   return {
     spec: () => ({ ...current() }),

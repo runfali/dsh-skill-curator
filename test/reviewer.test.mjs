@@ -222,7 +222,8 @@ test('session-model connection blip (killed) is retried and succeeds', async () 
     getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
     async start(provider, request) {
       calls += 1
-      if (calls === 1) return { result: Promise.resolve({ output: [], stopReason: 'aborted', diagnostic: '' }), dispose: async () => {} }
+      // alpha.3 settleRun 语义：aborted 且 diagnostic 缺席(undefined) 才映射 killed（空串也算 failed）
+      if (calls === 1) return { result: Promise.resolve({ output: [], stopReason: 'aborted' }), dispose: async () => {} }
       return completedRun('重试后完成')
     }
   }
@@ -270,7 +271,7 @@ test('reviewRetryCount=0 disables retry entirely', async () => {
     getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
     async start() {
       calls += 1
-      return { result: Promise.resolve({ output: [], stopReason: 'aborted', diagnostic: '' }), dispose: async () => {} }
+      return { result: Promise.resolve({ output: [], stopReason: 'aborted' }), dispose: async () => {} }
     }
   }
   const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
