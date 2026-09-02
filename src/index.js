@@ -90,6 +90,7 @@ export function apply(ctx, config = {}) {
   // 触发：agent/created → agent 级 turn-stopping 计数
   // ---------------------------------------------------------------------
   const running = new WeakSet() // 同会话互斥：一次只跑一个评审
+  const tracked = new WeakSet() // 同 agent 幂等：agent/created 与补注册共用 installAgentTrack
 
   /**
    * 异步后台评审（不阻塞调用方；全异常兜底，绝不炸主线）。
@@ -188,13 +189,21 @@ export function apply(ctx, config = {}) {
   // 计数按 sessionId（非 agent 对象）维护：agent 重建（/compact、会话恢复）时继承计数，
   // 避免触发间隔被重置（审计 P2-2）；agent/disposed 时清理。
   const countersBySession = new Map()
-  ctx.effect(() => ctx.on('agent/created', (payload) => {
-    const agent = payload && payload.agent
-    if (!agent || !agent.ctx || !agent.session) return
+
+  /**
+   * 给单个 agent 挂 turn-stopping 计数钩子（agent/created 与 apply 期补注册
+   * 共用；幂等保护：同会话重复到达不重挂、不重置计数——审计 P2-2）。
+   * @param {object} agent
+   * @returns {boolean} 是否实际挂上（guard 不过或重复到达为 false）
+   */
+  function installAgentTrack(agent) {
+    if (!agent || !agent.ctx || !agent.session) return false
+    if (tracked.has(agent)) return false
+    tracked.add(agent)
     const header = agent.session.header || {}
     // 评审子代理自身不参与触发（双保险：origin 标记 + 委派深度）
-    if (header.origin === 'subagent') return
-    if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return
+    if (header.origin === 'subagent') return false
+    if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return false
     const sessionId = agent.session.id
     let counter = countersBySession.get(sessionId)
     let ownsCounter = false
@@ -226,7 +235,36 @@ export function apply(ctx, config = {}) {
         countersBySession.delete(sessionId)
       }
     })
+    return true
+  }
+
+  // 触发路径一：agent/created（新创建的 agent）。
+  ctx.effect(() => ctx.on('agent/created', (payload) => {
+    try {
+      installAgentTrack(payload && payload.agent)
+    } catch (error) {
+      ctx.logger.warn('skill-curator: agent/created handler error: %s', (error && error.message) || error)
+    }
   }), 'skill-curator: agent track')
+
+  // 触发路径二：apply 期补注册（2026-09-02 修复）。
+  // dsh 重启后 resume 的 agent（及任何插件晚于 agent 创建的时序），其
+  // agent/created 在本监听注册之前已经 emit——错过即永久错过，resume 会话
+  // 永远挂不上 turn-stopping（症状：重启后当前会话 3 轮结束不触发评审；
+  // 同坑先例 = dsh-mem0-plugins 2026-08-25 补注册修复）。host 的 agents
+  // registry 可枚举现存 live agents，apply 尾声统一补挂；installAgentTrack
+  // 幂等，与路径一重复到达不会双挂。
+  const agentsRegistry = ctx.get && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+  if (agentsRegistry && typeof agentsRegistry.list === 'function') {
+    try {
+      const existing = agentsRegistry.list()
+      if (existing && existing.length) {
+        for (const agent of existing) installAgentTrack(agent)
+      }
+    } catch (error) {
+      ctx.logger.warn('skill-curator: existing-agent backfill failed: %s', (error && error.message) || error)
+    }
+  }
 
   // ---------------------------------------------------------------------
   // 手动命令：/skill-refine [focus]
