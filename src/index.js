@@ -107,7 +107,15 @@ export function apply(ctx, config = {}) {
     Promise.resolve()
       .then(async () => {
         const s = settings.spec()
-        const events = agent.session && agent.session.events ? [...agent.session.events] : []
+        // dsh 0.1.2-alpha.4 起 Session 不再暴露 events 属性（prototype 实证仅有
+        // snapshotEvents()）——旧读法恒为 undefined → 摘要恒空 → 每次评审被
+        // 「no user/model turns」静默跳过且不留任何记录（2026-09-02 修复）。
+        // 保留 events 兜底以兼容旧版 dsh 与测试 mock。
+        const session = agent.session
+        const rawEvents = session
+          ? (typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events)
+          : undefined
+        const events = Array.isArray(rawEvents) ? [...rawEvents] : []
         const { text, stats } = buildDigest(events, { tail: s.digestTail })
         // 无实质对话内容（events 全为 tool/plugin/系统事件）时不起评审
         if (stats.total === 0) {

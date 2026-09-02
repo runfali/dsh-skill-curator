@@ -117,14 +117,21 @@ function makeCtx(config = {}) {
   return ctx
 }
 
-function makeAgent(ctx, { origin, delegationDepth } = {}) {
+function makeAgent(ctx, { origin, delegationDepth, legacyEvents } = {}) {
+  const history = [
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一轮提问' }] } },
+    { type: 'assistant/message', data: { message: { source: { kind: 'model' }, content: [{ type: 'text', text: '第一轮回答' }] } } }
+  ]
   const session = {
     id: 'sess-' + Math.random().toString(36).slice(2, 8),
-    header: { ...(origin !== undefined ? { origin } : {}), ...(delegationDepth !== undefined ? { delegationDepth } : {}) },
-    events: [
-      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一轮提问' }] } },
-      { type: 'assistant/message', data: { message: { source: { kind: 'model' }, content: [{ type: 'text', text: '第一轮回答' }] } } }
-    ]
+    header: { ...(origin !== undefined ? { origin } : {}), ...(delegationDepth !== undefined ? { delegationDepth } : {}) }
+  }
+  if (legacyEvents) {
+    // 旧版 dsh（≤0.1.2-alpha.3）形状：Session 直接暴露 events 属性
+    session.events = history
+  } else {
+    // dsh 0.1.2-alpha.4+ 真实形状：Session 仅有 snapshotEvents()（无 events 属性）
+    session.snapshotEvents = () => history
   }
   return { id: session.id, session, ctx: ctx.createAgentCtx({}) }
 }
@@ -290,6 +297,72 @@ test('empty-status session (no user/model turns) never spawns review', async () 
   for (const cb of cbs) await cb({ turn: 2 })
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(started.length, 0, 'no review for content-less session')
+})
+
+test('alpha.4 session shape (snapshotEvents, no events property) still spawns review (2026-09-02 回归)', async () => {
+  const started = []
+  const env = makeCtx()
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider(n) { return n === 'spawn' ? { name: n } : undefined },
+        list: () => ['spawn'],
+        async start(provider, request) {
+          started.push(request)
+          return { result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  apply(env, { skillNudgeInterval: 1 })
+  const t = env.__test
+  // dsh 0.1.2-alpha.4 真实形状：session 只有 snapshotEvents()，读 events 属性为
+  // undefined——修复前摘要恒空，每次评审被静默跳过（无记录、无日志）
+  const session = {
+    id: 'sess-alpha4',
+    header: {},
+    snapshotEvents: () => [
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '真实回合输入' }] } },
+      { type: 'assistant/message', data: { message: { source: { kind: 'model' }, content: [{ type: 'text', text: '真实回合输出' }] } } }
+    ]
+  }
+  const agent = { id: 'sess-alpha4', session, ctx: env.createAgentCtx({}) }
+  await emitOn(t.listeners, 'agent/created', { agent })
+  const cbs = t.agentCtxs[0].listeners.get('agent/turn-stopping')
+  for (const cb of cbs) await cb({ turn: 1 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(started.length, 1, 'review spawned on alpha.4 session shape')
+  const promptText = started[0].prompt.map((b) => b.text || '').join('\n')
+  assert.ok(promptText.includes('真实回合输入'), 'digest built from snapshotEvents')
+})
+
+test('legacy session shape (plain events array) keeps working via fallback', async () => {
+  const started = []
+  const env = makeCtx()
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider(n) { return n === 'spawn' ? { name: n } : undefined },
+        list: () => ['spawn'],
+        async start(provider, request) {
+          started.push(request)
+          return { result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  apply(env, { skillNudgeInterval: 1 })
+  const t = env.__test
+  const agent = makeAgent(env, { legacyEvents: true })
+  await emitOn(t.listeners, 'agent/created', { agent })
+  const cbs = t.agentCtxs[0].listeners.get('agent/turn-stopping')
+  for (const cb of cbs) await cb({ turn: 1 })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(started.length, 1, 'review spawned on legacy events shape')
+  const promptText = started[0].prompt.map((b) => b.text || '').join('\n')
+  assert.ok(promptText.includes('第一轮提问'), 'digest built from legacy events')
 })
 
 test('mutual exclusion: concurrent triggers are skipped', async () => {

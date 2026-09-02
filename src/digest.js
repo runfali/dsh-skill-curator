@@ -4,7 +4,8 @@
  * 对齐 hermes `_digest_history` 的形态：评审子代理不拿全量原始会话，
  * 而是拿到一份「近 N 条全文 + 更早逐轮压缩」的快照，控制注入成本。
  *
- * 输入：agent.session.events（SessionEvent[]）。
+ * 输入：session 事件快照（dsh 0.1.2-alpha.4+ 用 session.snapshotEvents()，
+ * 旧版为 session.events 属性，由调用方统一取好后传入）。
  * 只提取真人输入（user/message，source.kind==='user'）与模型回复
  * （assistant/message，source.kind==='model'）：
  *   - plugin 注入（source.kind==='plugin'，如 dsh-mem0-plugins 的提醒）不进摘要
@@ -49,7 +50,7 @@ export function isAssistantMessage(event) {
 /**
  * 构建会话摘要。
  *
- * @param {Array} events - session.events 快照。
+ * @param {Array} events - session 事件快照（调用方经 snapshotEvents()/events 取得）。
  * @param {object} opts
  * @param {number} [opts.tail=24] 保留全文的最近消息条数（仅计 user/assistant）。
  * @param {number} [opts.userMaxChars=600] 旧消息单条 user 截断长度。
