@@ -7,9 +7,12 @@
  * （默认 'skill-curator-review'），adapter 在每次 stream 时从设置闭包读取
  * reviewBaseUrl / reviewApiKey（设置热改即时生效，无需重注册）。
  *
- * 实现为鸭子对象（非 extends LlmAdapter）：唯一的纯抽象方法 stream() 必实现，
- * 其余（providerInfo/listModels/resolveModel/prepareCall/retryPolicy）提供最小
- * 语义；wire 格式为 OpenAI 兼容 /chat/completions（非流式），输出转成
+ * 实现为鸭子对象（非 extends LlmAdapter）。宿主对 adapter 的调用面是**整个
+ * LlmAdapter 基类**（抽象类只有 stream() 是 abstract，但基类实现了 providerInfo /
+ * providerRetryPolicy / imageRequestPricing / listModels / resolveModel /
+ * prepareCall 六个具体方法）——鸭子对象享受不到基类默认实现，必须**逐个自备**
+ * （2026-09-10 0.1.5-rc.1 适配实证：缺 imageRequestPricing 会在 token 计量时
+ * TypeError，见下）。wire 格式为 OpenAI 兼容 /chat/completions（非流式），输出转成
  * StreamChunk 协议（block-start → deltas → block-end → finish），并正确
  * 表达模型发起的工具调用（tool-call 块），使评审子代理的 skill-library-*
  * 工具链路可用。
@@ -92,6 +95,18 @@ export function createCustomAdapter(getSpec, route) {
       return { id: provider, name: `Skill review (${provider})` }
     },
     providerRetryPolicy() {
+      return undefined
+    },
+    // 宿主对 adapter 的调用面 = LlmAdapter 基类全体方法。抽象类只有 stream() 是
+    // abstract，其余六个由基类给默认实现——鸭子对象拿不到，必须显式补全。
+    // 漏掉 imageRequestPricing 的实证后果（0.1.5-rc.1）：dsh-token-meter 的
+    // measure() 无条件调用 llm.imageRequestPricing()，其内部无条件调用
+    // adapter.imageRequestPricing()（无 optional-call 保护）→ TypeError。
+    // 走自定义端点评审过的子代理 session 头里长存本路由，之后每次计量（agent/pre-step
+    // 压实、会话导出等）都会炸：压实路径有 try/catch → 每步刷 "step compaction failed"
+    // 且该子代理自动压实静默失效；compactNow()/acp 计量路径无兜底 → 直接抛。
+    // 声明"本路由不提供图片计费"，与基类默认语义一致。
+    imageRequestPricing() {
       return undefined
     },
     async listModels(provider) {

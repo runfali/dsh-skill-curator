@@ -26,29 +26,81 @@ import { createCustomAdapter } from './custom-adapter.js'
 /** 自定义端点默认 provider 路由名（设置 reviewProvider 非空时用之）。 */
 export const CUSTOM_REVIEW_ROUTE = 'skill-curator-review'
 
-/** 自定义端点 adapter 注册缓存：route -> adapter 实例（凭据每请求读 settings）。 */
-const customAdapters = new Map() // route -> adapter
+/**
+ * 自定义端点 adapter 的进程内注册记录：route -> { adapter, handle }。
+ *
+ * 为什么需要它（2026-09-10 适配轮实测的存量缺陷）：宿主 `registerAdapter` 的
+ * 服务代理把 `this.ctx` 绑到**调用方 fiber**，返回的 handle 是 `ctx.effect(...)` 的
+ * disposer——**本插件 fiber 卸载（patch 热重载 / 卸载重挂）时路由会被宿主自动摘掉**。
+ * 原实现只做「Map 里有就跳过」的存在性判断，卸载后 Map 里仍留着过期条目 →
+ * 同一进程内重新 apply 时直接 return、**永不重注册** → 自定义端点评审在「首次评审后
+ * 发生过一次插件重载」的进程里 100% 失败（provider 路由不存在）。
+ *
+ * 修法：判据从「注册过一次」改为「**当下仍挂载**」——用 `llm.listProviders()`（服务端
+ * 权威读，dsh-llm lib/index.js:1846）核验 route 在列；不在列即重注册并刷新记录。
+ * （handle 仅作记录留痕，不参与判据。）
+ */
+const customAdapters = new Map() // route -> { adapter, handle }
 
 /**
  * 确保自定义端点 adapter 已注册到 llm 服务。
- * 幂等：同名路由已注册则复用；llm 服务缺失时抛错（评审前由调用方兜底）。
+ *
+ * 语义 = 「确保**当下可用**」而非「确保注册过一次」：路由仍挂载时幂等复用，
+ * 被宿主摘掉（本插件 fiber 卸载）时重注册。llm 服务缺失时抛错（评审前由调用方兜底）。
  * @param {object} ctx - cordis 上下文。
  * @param {string} route - provider 路由名。
  * @param {() => object} getSpec - 当前设置快照读取器（adapter 每次 stream 现读）。
+ * @param {object} [llm] - llm 服务（缺省从 ctx 取；测试可注入）。
  */
-export function ensureCustomAdapter(ctx, route, getSpec) {
-  if (customAdapters.has(route)) return
-  const llm = ctx.get('llm')
+export function ensureCustomAdapter(ctx, route, getSpec, llm = ctx.get('llm')) {
   if (llm === undefined || typeof llm.registerAdapter !== 'function') {
     throw new Error('llm service unavailable — cannot register custom review endpoint')
   }
+  // 存活判据：宿主注册表里仍认得这条路由（卸载后 handle 已被宿主 dispose，路由消失）。
+  // `listProviders` 缺席（老宿主/极简桩）时退回「已注册即视为存活」——不制造重注册抖动，
+  // 但真宿主 dsh-llm 提供该方法（lib/index.js:1846），故真机走的是权威判据。
+  const live = customAdapters.get(route)
+  if (live !== undefined && !canProbeRoutes(llm)) return
+  if (live !== undefined && routeIsMounted(llm, route)) return
   const adapter = createCustomAdapter(getSpec, route)
-  customAdapters.set(route, adapter)
+  let handle
   try {
-    llm.registerAdapter([route], adapter)
+    handle = llm.registerAdapter([route], adapter)
   } catch (error) {
+    // 重复注册（DUPLICATE_ADAPTER）说明路由已被本进程别处/旧注册占着——读回存活即可
+    if (routeIsMounted(llm, route)) {
+      customAdapters.set(route, { adapter: (live && live.adapter) || adapter, handle: live && live.handle })
+      return
+    }
     customAdapters.delete(route)
     throw error
+  }
+  customAdapters.set(route, { adapter, handle })
+}
+
+/**
+ * 宿主是否提供路由存活探测能力（`listProviders`，dsh-llm lib/index.js:1846）。
+ * @param {object} llm - llm 服务。
+ * @returns {boolean} true = 可用服务端权威读判断路由存活。
+ */
+export function canProbeRoutes(llm) {
+  return Boolean(llm && typeof llm.listProviders === 'function')
+}
+
+/**
+ * 路由当前是否真的挂在宿主注册表上（服务端权威读）。
+ * @param {object} llm - llm 服务。
+ * @param {string} route - provider 路由名。
+ * @returns {boolean} true = 路由仍可被宿主解析。
+ */
+export function routeIsMounted(llm, route) {
+  if (!canProbeRoutes(llm)) return false
+  try {
+    const providers = llm.listProviders()
+    if (!Array.isArray(providers)) return false
+    return providers.some((entry) => (typeof entry === 'string' ? entry : entry && entry.id) === route)
+  } catch {
+    return false
   }
 }
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  runSkillReview, ensureCustomAdapter, isEndpointModelFailure, CUSTOM_REVIEW_ROUTE, createReviewLog
+  runSkillReview, ensureCustomAdapter, isEndpointModelFailure, CUSTOM_REVIEW_ROUTE, createReviewLog, routeIsMounted
 } from '../src/reviewer.js'
 import { createCustomAdapter, blocksToOpenAiText, openAiRole, streamChunksFromOpenAi } from '../src/custom-adapter.js'
 
@@ -26,7 +26,16 @@ function makeCtx({ failFirst, firstDetail = 'custom review endpoint HTTP 401', s
       return completedRun(isFallback ? secondText : '主路径完成')
     }
   }
-  const llm = { registerAdapter(providers, adapter) { llm.registered = { providers, adapter } } }
+  // 保真的 llm 桩：真实 dsh-llm 既有 registerAdapter 也有 listProviders
+  // （lib/index.js:1780 / 1846）；只模拟 registerAdapter 会让「路由存活判据」失真。
+  const llm = {
+    routes: [],
+    registerAdapter(providers, adapter) {
+      for (const p of providers) if (!llm.routes.includes(p)) llm.routes.push(p)
+      llm.registered = { providers, adapter }
+    },
+    listProviders() { return llm.routes.map((id) => ({ id, name: id })) }
+  }
   const ctx = {
     get(key) {
       if (key === 'subagents') return subagents
@@ -80,7 +89,12 @@ test('non-endpoint failure does NOT fall back (rethrows start errors)', async ()
     getProvider: () => ({ name: 'spawn' }), list: () => ['spawn'],
     async start() { throw new Error('subagent provider missing — deployment misconfigured') }
   }
-  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const llmStub = {
+    routes: [],
+    registerAdapter(providers) { for (const p of providers) if (!llmStub.routes.includes(p)) llmStub.routes.push(p) },
+    listProviders() { return llmStub.routes.map((id) => ({ id, name: id })) }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : k === 'llm' ? llmStub : undefined), logger: { info() {}, warn() {} } }
   await assert.rejects(
     runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm1' }), getSpec: () => spec() }),
     /provider missing/
@@ -103,7 +117,7 @@ test('registered-route override still works without custom endpoint', async () =
 
 test('ensureCustomAdapter registers once; llm missing throws', async () => {
   const seen = []
-  const llm = { registerAdapter(p, a) { seen.push(p) } }
+  const llm = { routes: [], registerAdapter(p, a) { seen.push(p); for (const r of p) llm.routes.push(r) }, listProviders() { return llm.routes.map((id) => ({ id, name: id })) } }
   const ctx = { get: (k) => (k === 'llm' ? llm : undefined), logger: { info() {} } }
   const getSpec = () => ({})
   ensureCustomAdapter(ctx, 'route-a', getSpec)
@@ -209,7 +223,12 @@ test('killed (timeout) on custom endpoint falls back even with empty detail', as
       return completedRun('主模型兜底完成')
     }
   }
-  const ctx = { get: (k) => (k === 'subagents' ? subagents : undefined), logger: { info() {}, warn() {} } }
+  const llmStub = {
+    routes: [],
+    registerAdapter(providers) { for (const p of providers) if (!llmStub.routes.includes(p)) llmStub.routes.push(p) },
+    listProviders() { return llmStub.routes.map((id) => ({ id, name: id })) }
+  }
+  const ctx = { get: (k) => (k === 'subagents' ? subagents : k === 'llm' ? llmStub : undefined), logger: { info() {}, warn() {} } }
   const out = await runSkillReview(ctx, agent, { prompt: 'P', spec: spec({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm1' }), getSpec: () => spec() })
   assert.equal(out.ok, true)
   assert.ok(out.fallback && /killed/.test(out.fallback.reason), 'fallback recorded for killed')
@@ -291,4 +310,105 @@ test('custom adapter sends attribution user-agent header', async () => {
   } finally {
     globalThis.fetch = realFetch
   }
+})
+// ---------------------------------------------------------------------------
+// 适配面守护：鸭子 adapter 必须自备 LlmAdapter 的**全部**方法
+// （2026-09-10 0.1.5-rc.1 适配实证的 P1：缺 imageRequestPricing）
+//
+// 背景：宿主 ctx.llm.registerAdapter 存的是原对象（prepareRoutes 只读 providerInfo/
+// providerRetryPolicy，其余方法在调用期直接取 adapter.<name>）。抽象类只有 stream() 是
+// abstract，但基类实现了 providerInfo/providerRetryPolicy/imageRequestPricing/
+// listModels/resolveModel/prepareCall —— 鸭子对象拿不到这些默认实现，缺一个就是
+// TypeError。imageRequestPricing 更是被 dsh-token-meter 的 measure() 无条件调用。
+//
+// 断言形状：① 静态列表逐个在实例上存在；② 与宿主真实 LlmAdapter.prototype 的
+// 方法名集合逐名对齐（宿主可读时；不可读则显式跳过，不假绿）。
+// ---------------------------------------------------------------------------
+test('adapter surface: every LlmAdapter base-class method is implemented', async () => {
+  const adapter = createCustomAdapter(() => ({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm' }), 'probe-route')
+  // 基类的六个具体实现 + 唯一的 abstract stream = 宿主可能调用的全集
+  const BASE_METHODS = ['providerInfo', 'providerRetryPolicy', 'imageRequestPricing', 'listModels', 'resolveModel', 'prepareCall', 'stream']
+  for (const name of BASE_METHODS) {
+    assert.equal(typeof adapter[name], 'function', 'adapter 缺方法 ' + name + '（鸭子对象不会继承 LlmAdapter 基类实现）')
+  }
+  // 交叉验证：宿主真实 LlmAdapter.prototype 的自身方法名必须被上述集合覆盖
+  const { readFileSync } = await import('node:fs')
+  const { createRequire } = await import('node:module')
+  const req = createRequire(import.meta.url)
+  let LlmAdapter = null
+  try {
+    const mod = req('@deepseek-ai/dsh-llm')
+    LlmAdapter = mod.LlmAdapter ?? mod.default?.LlmAdapter ?? null
+  } catch { /* 宿主/依赖不可解析则跳过交叉验证 */ }
+  if (LlmAdapter && typeof LlmAdapter === 'function' && LlmAdapter.prototype) {
+    const hostMethods = Object.getOwnPropertyNames(LlmAdapter.prototype).filter((n) => n !== 'constructor' && typeof LlmAdapter.prototype[n] === 'function')
+    assert.ok(hostMethods.length > 0, '宿主 LlmAdapter.prototype 方法集为空（探针失效）')
+    for (const name of hostMethods) {
+      assert.ok(BASE_METHODS.includes(name), '宿主 LlmAdapter 新增了方法 ' + name + ' — 请同步补进 adapter 与本次断言')
+      assert.equal(typeof adapter[name], 'function', 'adapter 缺宿主方法 ' + name)
+    }
+  } else {
+    assert.equal(typeof adapter.imageRequestPricing, 'function', '静态兜底：imageRequestPricing 必须存在')
+  }
+  // 行为断言：宿主 facade 的调用表达式不得抛错（dsh-llm 内部即 ?.adapter.<m>(...)）
+  const registry = new Map([['probe-route', { adapter }]])
+  assert.equal(registry.get('probe-route')?.adapter.imageRequestPricing('probe-route', 'm'), undefined, 'imageRequestPricing 必须同步返回 undefined（不声明图片计费）')
+})
+
+test('adapter surface: imageRequestPricing regression — missing method breaks token metering', async () => {
+  // 反证：删掉该方法即复现宿主 TypeError（证明这条守护不是装饰）
+  const adapter = createCustomAdapter(() => ({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm' }), 'probe-route-2')
+  delete adapter.imageRequestPricing
+  const registry = new Map([['probe-route-2', { adapter }]])
+  assert.throws(
+    () => registry.get('probe-route-2')?.adapter.imageRequestPricing('probe-route-2', 'm'),
+    /is not a function/,
+    '宿主 facade 表达式在方法缺失时必须抛 TypeError（守护有效性反证）'
+  )
+})
+// ---------------------------------------------------------------------------
+// 路由存活守护：插件 fiber 卸载后必须能**重注册**（2026-09-10 适配轮抓到的存量缺陷）
+//
+// 背景：宿主 registerAdapter 的服务代理把 ctx 绑到**调用方 fiber**，返回的 handle 是
+// ctx.effect 的 disposer → 本插件 fiber 卸载（patch 热重载 / 卸载重挂）时宿主自动摘掉路由。
+// 原实现只做「Map 有就跳过」的存在性判断 → 卸载后同进程重 apply 永不重注册 →
+// 自定义端点评审在该进程内 100% 失败（provider 路由不存在）。
+// ---------------------------------------------------------------------------
+test('route liveness: re-registers after the host drops the route (fiber unload)', () => {
+  const seen = []
+  const llm = {
+    routes: [],
+    registerAdapter(providers) { for (const r of providers) { llm.routes.push(r); seen.push(r) } },
+    listProviders() { return llm.routes.map((id) => ({ id, name: id })) }
+  }
+  const ctx = { get: (k) => (k === 'llm' ? llm : undefined), logger: { info() {}, warn() {} } }
+  const getSpec = () => ({})
+  const route = 'reload-probe-route'
+
+  ensureCustomAdapter(ctx, route, getSpec)
+  assert.equal(llm.routes.filter((r) => r === route).length, 1, '首次注册')
+  ensureCustomAdapter(ctx, route, getSpec)
+  assert.equal(seen.length, 1, '仍挂载时幂等：不重复注册')
+
+  // 模拟宿主在本插件 fiber 卸载时撤销路由（dsh-llm registerAdapter 的 yield 清理）
+  llm.routes = []
+  ensureCustomAdapter(ctx, route, getSpec)
+  assert.equal(llm.routes.filter((r) => r === route).length, 1, '卸载后必须重注册（原实现在此永久失效）')
+  assert.equal(seen.length, 2, '重注册发生且只发生一次')
+})
+
+test('route liveness: stale cache must not mask a missing route (regression counter-proof)', () => {
+  // 反证：若判据退回「Map 里有过就跳过」，卸载后重注册不会发生——证明该守护有效
+  const llm = {
+    routes: [],
+    registerAdapter(providers) { for (const r of providers) llm.routes.push(r) },
+    listProviders() { return llm.routes.map((id) => ({ id, name: id })) }
+  }
+  const ctx = { get: (k) => (k === 'llm' ? llm : undefined), logger: { info() {}, warn() {} } }
+  const route = 'stale-probe-route'
+  ensureCustomAdapter(ctx, route, () => ({}))
+  llm.routes = []
+  assert.equal(routeIsMounted(llm, route), false, '宿主已摘掉路由时存活判据必须为 false')
+  ensureCustomAdapter(ctx, route, () => ({}))
+  assert.equal(routeIsMounted(llm, route), true, '重注册后路由重新可解析')
 })

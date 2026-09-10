@@ -92,14 +92,36 @@ dsh plugin --profile web add ./
 
 产权守卫：只有 frontmatter 盖 `author: dsh-skill-curator` 章或列入 adoptSkills 的 skill 才能被修改，其余一律拒绝并明确提示「先收养」。路径全部越界校验，写盘原子（tmp + rename）。
 
+## 环境要求
+
+```jsonc
+// package.json（机器可读）
+"engines": { "node": ">=22" },
+"dependencies": {
+  "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-subagent": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-tools": "^0.1.5-rc.1",
+  "@deepseek-ai/schemastery": "^3.18.2"
+},
+"dsh": { "engines": { "dsh": ">=0.1.2-alpha.3 <0.2.0 || >=0.1.5-alpha.1 <0.1.6" } }
+```
+
+- **已验证宿主**：`@deepseek-ai/dsh 0.1.5-rc.1`（Node v24）。
+- **区间里的析取是承重的**：npm semver 只从「区间组自身含同 `[major,minor,patch]` 元组预发布」的组满足预发布，故单区间 `<0.2.0` 那组**覆盖不了** `0.1.5-rc.1`。`test/entry.test.mjs` 用 10 行判定表 + 反证（改回旧区间即红）+ 宿主真实 `semver.satisfies` 交叉验证钉住。
+- **无安装脚本、禁 gyp/原生编译**：全树纯 ESM，`test/entry.test.mjs` 守护（无 `install`/`postinstall`/`prepare`、无 `optionalDependencies`、依赖面仅 `@deepseek-ai/*`）。
+
 ## 开发
 
 ```bash
-pnpm install        # 或把 node_modules 指向 dsh 安装副本（离线测试法，见测试注记）
-pnpm test           # node --test 单测套件
+pnpm install                # 部分环境需带代理/独立 cache（默认 npm cache 可能不可写）
+npm test                    # entry + 单测 + smoke + client-smoke 全量
+node test/entry.test.mjs    # 入口直载、manifest、engines 区间、键集合一致性、依赖卫生
 node test/smoke.mjs         # 模块/工具/白名单冒烟
 node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
 ```
+
+`docs/EVIDENCE.md` 记录隔离实例的安装/启动/真机验证（一次性 `DSH_HOME`，不碰任何已部署实例）；`docs/AUDIT.md` 记录各轮审计。
 
 ## License
 

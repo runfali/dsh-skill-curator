@@ -14,8 +14,11 @@
  *   4. 手动：/skill-refine [focus] 命令立即对当前会话发起评审。
  *
  * 已知平台约束（docs/COMPARISON.md）：
- *   - turn-stopping 运行时载荷无 agent 字段（d.ts 声明有，实现没有），
- *     所以用 agent/created（实测带 agent）闭包注册 agent.ctx 子监听；
+ *   - 触发计数用 agent/created 闭包注册 agent.ctx 子监听（scoped 监听天然多会话隔离）；
+ *     turn-stopping 载荷经 agentEvents 的 fused() 注入 agent（0.1.5-rc.1 源码核对：
+ *     dsh-agent-loop 的 dispatch.serial("agent/turn-stopping", {turn,signal}) 走
+ *     agent-scoped carrier，载荷实为 {agent,turn,signal}），但闭包取 agent 同样正确，
+ *     且不依赖该字段的稳定性；
  *   - 回调里不往父会话注入任何事件（防污染会话历史与记忆）；
  *   - 评审异步执行，与主线完全解耦。
  */
@@ -183,9 +186,10 @@ export function apply(ctx, config = {}) {
       .finally(done)
   }
 
-  // 全局监听 agent/created（载荷带 agent，实测确认），在 agent 级 scoped ctx 上注册
-  // turn-stopping——其运行时载荷仅有 {turn, signal}，没有 agent 字段（实现与 d.ts 漂移），
-  // 会话标识从闭包拿。cordis 的 on 第三参数是过滤器，绝不能当 label 传。
+  // 全局监听 agent/created（载荷 {agent}），在 agent 级 scoped ctx 上注册
+  // turn-stopping。0.1.5-rc.1 源码核对：该事件经 agentEvents 的 fused() 注入 agent
+  // （载荷 {agent, turn, signal}），但会话标识仍从闭包拿——不依赖事件字段，更稳。
+  // cordis 的 on 第三参数是过滤器，绝不能当 label 传。
   // 计数按 sessionId（非 agent 对象）维护：agent 重建（/compact、会话恢复）时继承计数，
   // 避免触发间隔被重置（审计 P2-2）；agent/disposed 时清理。
   const countersBySession = new Map()

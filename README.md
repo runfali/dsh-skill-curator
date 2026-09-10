@@ -86,14 +86,36 @@ The review subagent can only call these six (they are also usable by any session
 
 Ownership guard: only skills stamped `author: dsh-skill-curator` or listed in `adoptSkills` can be patched; everything else is refused with an explicit "adopt first" message. Paths are boundary-checked; writes are atomic (tmp + rename).
 
+## Requirements
+
+```jsonc
+// package.json — machine-readable
+"engines": { "node": ">=22" },
+"dependencies": {
+  "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-subagent": "^0.1.5-rc.1",
+  "@deepseek-ai/dsh-tools": "^0.1.5-rc.1",
+  "@deepseek-ai/schemastery": "^3.18.2"
+},
+"dsh": { "engines": { "dsh": ">=0.1.2-alpha.3 <0.2.0 || >=0.1.5-alpha.1 <0.1.6" } }
+```
+
+- **Verified host**: `@deepseek-ai/dsh 0.1.5-rc.1` (Node v24).
+- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1`. `test/entry.test.mjs` pins this with a 10-row decision table, a counter-proof (reverting to the old single range turns red), and a cross-check against the host's real `semver.satisfies`.
+- **No install scripts, no gyp/native deps**: the whole tree is plain ESM; `test/entry.test.mjs` guards this (no `install`/`postinstall`/`prepare`, no `optionalDependencies`, dependency scope limited to `@deepseek-ai/*`).
+
 ## Development
 
 ```bash
-pnpm install        # or symlink node_modules to your dsh install (see test notes)
-pnpm test           # node --test unit suites
+pnpm install                # needs proxy/cache off the default npm cache on some hosts
+npm test                    # entry + unit + smoke + client-smoke (all suites)
+node test/entry.test.mjs    # entry load, manifest, engines range, key-set parity, dep hygiene
 node test/smoke.mjs         # module/tool/whitelist smoke
 node test/client-smoke.mjs  # client bundle smoke (real component-tree execution)
 ```
+
+`docs/EVIDENCE.md` records the isolated-instance install/start/E2E run (disposable `DSH_HOME`, no deployed instance touched); `docs/AUDIT.md` records the audit rounds.
 
 ## License
 
