@@ -52,6 +52,9 @@ function makeCtx(config = {}) {
   const routes = []
   const agentCtxs = []
   const presentations = []
+  // webServer 就绪开关：默认关（真机 apply 期的常见形态），需要时按测试打开。
+  let webServerReady = false
+  const webServerReadyGetter = () => webServerReady
   // 隔离：apply 时不给 skillsRoot，autoCommit 会落到**真实** ~/.dsh/skills 上提交。
   // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
@@ -74,7 +77,29 @@ function makeCtx(config = {}) {
         if (i >= 0) arr.splice(i, 1)
       }
     },
-    inject(services, cb) { cb(ctx) },
+    // 保真桩（第七路盲区）：真实宿主里 webServer 由 dsh-web-app 组合挂载，
+    // 与本插件 apply 的时序**不保证**。默认「未就绪」——只有显式就绪（或测试
+    // 传 webServerReady:true）时才回调依赖它的 inject，避免 stub 永远在场导致假绿。
+    inject(services, cb) {
+      const list = Array.isArray(services) ? services : [services]
+      // 只按「服务是否就绪」决定回调：webServer 由 dsh-web-app 组合挂载，
+      // 与本插件 apply 时序不保证（默认未就绪，需测试显式打开）。
+      const ready = list.every((s) => s !== 'webServer' || webServerReadyGetter())
+      if (!ready) return () => {}
+      // 注入回调拿到的是**子 ctx**：按请求的服务名挂上对应服务面（真实宿主同形）。
+      // 官方范例把路由注册包在 effect 里（dsh-client-connection/lib/index.js:843），
+      // 子 ctx 必须提供 effect，否则「注册了但没托管」这类缺陷测不出来。
+      const services_ = {}
+      for (const s of list) {
+        if (s === 'webServer') services_.webServer = { register(route) { routes.push(route); return () => {} } }
+        if (s === 'settings') services_.settings = ctx.settings
+      }
+      cb({
+        ...services_,
+        effect(fn) { const d = fn(); effects.push(typeof d === 'function' ? d : undefined); return d }
+      })
+      return () => {}
+    },
     settings: {
       // dsh 0.1.7：installSection / register 均已从 dsh-settings 移除（全库 0 命中），
       // 只剩 configure(presentation, owner) —— 注册设置页展示策略。
@@ -84,9 +109,13 @@ function makeCtx(config = {}) {
         return () => {}
       }
     },
+    // 一次性 ctx.get：真机 apply 期常常拿不到 webServer（服务未激活）→ 返回 undefined。
+    // 这正是本轮踩中的静默空转形态，桩必须如实模拟。
     get(key) {
       if (key === 'commands') return { register(def) { commands.push(def); return () => {} } }
-      if (key === 'webServer') return { register(route) { routes.push(route); return () => {} } }
+      if (key === 'webServer') {
+        return webServerReadyGetter() ? { register(route) { routes.push(route); return () => {} } } : undefined
+      }
       return undefined
     },
     tools: { register(def) { tools.push(def) } },
@@ -103,6 +132,7 @@ function makeCtx(config = {}) {
       agentCtxs.push({ agent, listeners: actxListeners })
       return actx
     },
+    __setWebServerReady(v) { webServerReady = v },
     __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, skillsRoot, backupRoot }
   }
   return ctx
@@ -137,12 +167,14 @@ const emitOn = (listeners, event, ...args) => Promise.all((listeners.get(event) 
  * 产生了两条垃圾提交）。这里统一兜底，任何测试都不可能再写真实技能库。
  */
 function applyIn(env, config = {}) {
-  return apply(env, { skillsRoot: env.__test.skillsRoot, backupRoot: env.__test.backupRoot, ...config })
+  const { __webServerReady, ...real } = config
+  env.__setWebServerReady(__webServerReady === true)
+  return apply(env, { skillsRoot: env.__test.skillsRoot, backupRoot: env.__test.backupRoot, ...real })
 }
 
 test('apply registers full chain (tools/listener/command/route)', async () => {
   const env = makeCtx({})
-  applyIn(env, {})
+  applyIn(env, { __webServerReady: true })
   const t = env.__test
   assert.equal(t.tools.length, 10, 'ten skill-library tools registered')
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
@@ -153,6 +185,25 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
+})
+
+test('webServer 未就绪时不静默丢路由；就绪后必须注册（第七路盲区回归）', async () => {
+  // 2026-09-28 实机故障回归：状态接口原用一次性 ctx.get('webServer')，
+  // webServer 由 dsh-web-app 组合挂载、与本插件 apply 时序不保证 →
+  // 服务未就绪时**永不注册**且零日志，设置卡「最近评审」永远显示"状态获取失败"。
+  // 修法 = ctx.inject(['webServer'], cb) 等待式。本条钉住两态：
+  //   ① 未就绪：不得注册（也没有别的手段），但不许抛错；
+  //   ② 服务随后就绪：必须补注册。
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: false })
+  const t = env.__test
+  assert.equal(t.routes.length, 0, 'not ready → not registered yet (no silent half-state)')
+
+  // 服务就绪（等价于宿主把 webServer 挂上）→ inject 回调触发 → 路由注册
+  const env2 = makeCtx({})
+  applyIn(env2, { __webServerReady: true })
+  assert.equal(env2.__test.routes.length, 1, 'ready → route registered')
+  assert.equal(env2.__test.routes[0].path, '/api/skill-curator/status')
 })
 
 test('tools read live (dereferenced) config: excludedSkills works as a protection list', async () => {

@@ -18,7 +18,7 @@ const mod = await import('../src/index.js')
 
 /** 最小 cordis 宿主上下文（只需 apply 用到的面）。 */
 function makeHost() {
-  const seen = { tools: [], listeners: new Map(), routes: [], commands: [], presentations: [], effects: [] }
+  const seen = { tools: [], listeners: new Map(), routes: [], commands: [], presentations: [], effects: [], webServerReady: true }
   const ctx = {
     fiber: { state: 2 },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
@@ -28,7 +28,16 @@ function makeHost() {
       seen.listeners.get(evt).push(cb)
       return () => {}
     },
-    inject(_services, cb) { cb(ctx) },
+    // 保真桩：注入回调拿子 ctx，且只在该服务就绪时回调（webServer 与 apply 时序不保证）
+    inject(services, cb) {
+      const list = Array.isArray(services) ? services : [services]
+      if (!list.every((s) => s !== 'webServer' || seen.webServerReady === true)) return () => {}
+      const child = { effect: (fn) => fn() }
+      if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
+      if (list.includes('settings')) child.settings = ctx.settings
+      cb(child)
+      return () => {}
+    },
     settings: { configure(presentation) { seen.presentations.push(presentation); return () => {} } },
     tools: { register(definition) { seen.tools.push(definition) } },
     get(key) {

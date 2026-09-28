@@ -13,13 +13,21 @@ const mod = await import('../src/index.js')
 const { runGit } = await import('../src/skill-tools.js')
 
 function host(skillsRoot) {
-  const seen = { tools: [], listeners: new Map(), presentations: [] }
+  const seen = { tools: [], listeners: new Map(), presentations: [], routes: [] }
   const ctx = {
     fiber: { state: 2 },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     effect: (fn) => { const d = fn(); return d },
     on(evt, cb) { if (!seen.listeners.has(evt)) seen.listeners.set(evt, []); seen.listeners.get(evt).push(cb); return () => {} },
-    inject: (_s, cb) => cb(ctx),
+    // 保真桩：注入回调拿子 ctx，只在该服务就绪时回调（webServer 与 apply 时序不保证）
+    inject(services, cb) {
+      const list = Array.isArray(services) ? services : [services]
+      const child = { effect: (fn) => fn() }
+      if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
+      if (list.includes('settings')) child.settings = ctx.settings
+      cb(child)
+      return () => {}
+    },
     settings: { configure: (p) => { seen.presentations.push(p); return () => {} } },
     tools: { register: (d) => seen.tools.push(d) },
     get: (k) => (k === 'commands' ? { register: () => () => {} } : undefined)
@@ -74,7 +82,14 @@ test('review completion auto-commits the skill library (real git, real plugin en
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     effect: (fn) => fn(),
     on(evt, cb) { if (!seen.listeners.has(evt)) seen.listeners.set(evt, []); seen.listeners.get(evt).push(cb); return () => {} },
-    inject: (_s, cb) => cb(ctx2),
+    inject(services, cb) {
+      const list = Array.isArray(services) ? services : [services]
+      const child = { effect: (fn) => fn() }
+      if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
+      if (list.includes('settings')) child.settings = ctx2.settings
+      cb(child)
+      return () => {}
+    },
     settings: { configure: () => () => {} },
     tools: { register: (d) => seen.tools.push(d) },
     get: (k) => (k === 'subagents' ? subagents : k === 'commands' ? { register: (d) => { seen.__cmd = d; return () => {} } } : undefined)

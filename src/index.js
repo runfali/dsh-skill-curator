@@ -341,22 +341,27 @@ export function apply(ctx, config = {}) {
   // ---------------------------------------------------------------------
   // 状态接口：GET /api/skill-curator/status（设置卡片轮询展示）
   // ---------------------------------------------------------------------
-  const webServer = ctx.get('webServer')
-  if (webServer !== undefined) {
+  // 等待式注入（第七路盲区，2026-09-28 实测踩中）：
+  // webServer 由 dsh-web-app 组合挂载，与本插件的 apply 时序不保证——
+  // 用一次性 ctx.get('webServer') 会在服务未就绪时静默空转（状态接口永不注册，
+  // 设置卡「最近评审」永远拿不到数据，且没有任何报错）。正确形态是 ctx.inject 等待就绪。
+  const LOOPBACK = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i
+  const sameOrigin = (req) => {
     // 同源守卫（对齐 dsh-config-center 先例）：/api 信任围栏校验 Host/Origin
-    const LOOPBACK = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i
-    const sameOrigin = (req) => {
-      const host = String(req.headers && (req.headers.host || req.headers.Host) || '')
-      if (!LOOPBACK.test(host)) return false
-      const origin = req.headers && (req.headers.origin || req.headers.Origin)
-      if (!origin) return true // 同源 GET 可能不带 Origin
-      try {
-        return LOOPBACK.test(new URL(String(origin)).host)
-      } catch {
-        return false
-      }
+    const host = String(req.headers && (req.headers.host || req.headers.Host) || '')
+    if (!LOOPBACK.test(host)) return false
+    const origin = req.headers && (req.headers.origin || req.headers.Origin)
+    if (!origin) return true // 同源 GET 可能不带 Origin
+    try {
+      return LOOPBACK.test(new URL(String(origin)).host)
+    } catch {
+      return false
     }
-    webServer.register({
+  }
+  ctx.inject(['webServer'], (wsCtx) => {
+    // 官方范例（dsh-client-connection/lib/index.js:843）：注册必须包在 effect 里，
+    // 卸载时 disposer 由 fiber 收口，避免热重载后残留旧路由。
+    wsCtx.effect(() => wsCtx.webServer.register({
       kind: 'exact',
       path: '/api/skill-curator/status',
       handler: async (req, res) => {
@@ -386,6 +391,6 @@ export function apply(ctx, config = {}) {
           res.end(JSON.stringify({ ok: false, error: String(error && error.message || error) }))
         }
       }
-    })
-  }
+    }), 'skill-curator: status route')
+  })
 }
