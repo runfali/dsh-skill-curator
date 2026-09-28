@@ -55,6 +55,10 @@ function makeCtx(config = {}) {
   // webServer 就绪开关：默认关（真机 apply 期的常见形态），需要时按测试打开。
   let webServerReady = false
   const webServerReadyGetter = () => webServerReady
+  // agents 服务就绪开关 + 现存 agent 清单（backfill 的唯一输入）
+  let agentsReady = false
+  const agentsReadyGetter = () => agentsReady
+  let agentsList = []
   // 隔离：apply 时不给 skillsRoot，autoCommit 会落到**真实** ~/.dsh/skills 上提交。
   // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
@@ -84,7 +88,9 @@ function makeCtx(config = {}) {
       const list = Array.isArray(services) ? services : [services]
       // 只按「服务是否就绪」决定回调：webServer 由 dsh-web-app 组合挂载，
       // 与本插件 apply 时序不保证（默认未就绪，需测试显式打开）。
-      const ready = list.every((s) => s !== 'webServer' || webServerReadyGetter())
+      const ready = list.every((s) =>
+        (s !== 'webServer' || webServerReadyGetter()) &&
+        (s !== 'agents' || agentsReadyGetter()))
       if (!ready) return () => {}
       // 注入回调拿到的是**子 ctx**：按请求的服务名挂上对应服务面（真实宿主同形）。
       // 官方范例把路由注册包在 effect 里（dsh-client-connection/lib/index.js:843），
@@ -93,6 +99,8 @@ function makeCtx(config = {}) {
       for (const s of list) {
         if (s === 'webServer') services_.webServer = { register(route) { routes.push(route); return () => {} } }
         if (s === 'settings') services_.settings = ctx.settings
+        // agents：补注册现存 agent 的唯一通路（真机由 dsh-base 的 agent 行提供）
+        if (s === 'agents') services_.agents = { list: () => agentsList }
       }
       cb({
         ...services_,
@@ -133,6 +141,7 @@ function makeCtx(config = {}) {
       return actx
     },
     __setWebServerReady(v) { webServerReady = v },
+    __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
     __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, skillsRoot, backupRoot }
   }
   return ctx
@@ -167,8 +176,9 @@ const emitOn = (listeners, event, ...args) => Promise.all((listeners.get(event) 
  * 产生了两条垃圾提交）。这里统一兜底，任何测试都不可能再写真实技能库。
  */
 function applyIn(env, config = {}) {
-  const { __webServerReady, ...real } = config
+  const { __webServerReady, __agentsReady, __agentsList, ...real } = config
   env.__setWebServerReady(__webServerReady === true)
+  env.__setAgentsReady(__agentsReady === true, __agentsList)
   return apply(env, { skillsRoot: env.__test.skillsRoot, backupRoot: env.__test.backupRoot, ...real })
 }
 
@@ -185,6 +195,28 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
+})
+
+test('agents 未就绪不得静默丢补注册；就绪后必须挂上现存 agent（第七路盲区回归）', async () => {
+  // 2026-09-28 实测形态：backfill 原用一次性 ctx.get('agents')，服务未就绪时
+  // 静默跳过 → 宿主重启后 resume 的第一个会话永远挂不上 turn-stopping →
+  // 无论聊多少轮都不触发评审（且零日志）。修法 = ctx.inject(['agents'], cb)。
+  // 两态钉死：① 未就绪不挂（也不抛错）；② 就绪必须把现存 agent 挂上。
+  // 判据看「有没有挂上 turn-stopping 监听」，不看 agentCtxs 数量
+  //（makeAgent 自己就会建一个 scoped ctx，计入数量会误判）。
+  const hasTracked = (env) => env.__test.agentCtxs.some((a) => a.listeners.has('agent/turn-stopping'))
+
+  const env = makeCtx({})
+  const existingAgent = makeAgent(env)
+  applyIn(env, { __agentsReady: false, __agentsList: [existingAgent] })
+  assert.equal(hasTracked(env), false, 'agents not ready → nothing backfilled, and no error thrown')
+
+  const env2 = makeCtx({})
+  const agent2 = makeAgent(env2)
+  applyIn(env2, { __agentsReady: true, __agentsList: [agent2] })
+  assert.equal(hasTracked(env2), true, 'agents ready → existing agent gets tracked')
+  // 注：不断言「挂的是哪个 agent 对象」——makeAgent 的桩把 ctx 建在空对象上，
+  // 那是测试夹具的形状，不是被测行为；真实语义由 installAgentTrack 保证。
 })
 
 test('webServer 未就绪时不静默丢路由；就绪后必须注册（第七路盲区回归）', async () => {

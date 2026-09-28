@@ -297,24 +297,31 @@ export function apply(ctx, config = {}) {
     }
   }), 'skill-curator: agent track')
 
-  // 触发路径二：apply 期补注册（2026-09-02 修复）。
+  // 触发路径二：补注册已存在的 agent（2026-09-02 修复，2026-09-28 修正时序）。
   // dsh 重启后 resume 的 agent（及任何插件晚于 agent 创建的时序），其
   // agent/created 在本监听注册之前已经 emit——错过即永久错过，resume 会话
   // 永远挂不上 turn-stopping（症状：重启后当前会话 3 轮结束不触发评审；
-  // 同坑先例 = dsh-mem0-plugins 2026-08-25 补注册修复）。host 的 agents
-  // registry 可枚举现存 live agents，apply 尾声统一补挂；installAgentTrack
-  // 幂等，与路径一重复到达不会双挂。
-  const agentsRegistry = ctx.get && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
-  if (agentsRegistry && typeof agentsRegistry.list === 'function') {
+  // 同坑先例 = dsh-mem0-plugins 2026-08-25 补注册修复）。
+  //
+  // ⚠️ 必须是**等待式注入**，不能用一次性 ctx.get('agents')：
+  // agents 由 dsh-base 的 agent 行提供，与本插件 apply 的时序不保证 ——
+  // 服务未就绪时一次性读拿到 undefined，补注册被静默跳过、零日志，
+  // 症状是「重启后第一个会话永远不被策展」（2026-09-28 实测：同一形态
+  // 先在 webServer 上爆发过一次，这里同源）。
+  // installAgentTrack 幂等，与路径一重复到达不会双挂。
+  ctx.inject(['agents'], (agentCtx) => {
     try {
-      const existing = agentsRegistry.list()
+      const existing = agentCtx.agents && typeof agentCtx.agents.list === 'function'
+        ? agentCtx.agents.list()
+        : []
       if (existing && existing.length) {
         for (const agent of existing) installAgentTrack(agent)
+        ctx.logger.info('skill-curator: backfilled %d existing agent(s)', existing.length)
       }
     } catch (error) {
       ctx.logger.warn('skill-curator: existing-agent backfill failed: %s', (error && error.message) || error)
     }
-  }
+  })
 
   // ---------------------------------------------------------------------
   // 手动命令：/skill-refine [focus]

@@ -4,6 +4,43 @@ import {
   runSkillReview, ensureCustomAdapter, isEndpointModelFailure, CUSTOM_REVIEW_ROUTE, createReviewLog, routeIsMounted
 } from '../src/reviewer.js'
 import { createCustomAdapter, blocksToOpenAiText, openAiRole, streamChunksFromOpenAi } from '../src/custom-adapter.js'
+// 契约测试直连宿主真实 settleRun：字段名漂移只有它抓得住（本地 mock 会跟着写错）
+import { settleRun } from '@deepseek-ai/dsh-subagent'
+
+test('契约：settleRun 成功分支的文本字段名随版本漂移（0.1.5=output / 0.1.7=result）', async () => {
+  // 2026-09-28 实机 bug：reviewer 只读 outcome.output。0.1.7-rc.2 把它改名成 result
+  // → summary 恒空 → 面板空白条目 + 自动 commit 的 message 只剩 "skill-curator:"。
+  // 本轮适配的「契约核查」把 settleRun 判成了「兼容」，就是这个坑。
+  //
+  // 宿主导出实码对比：
+  //   0.1.5-rc.1  dsh-subagent/lib/index.js:2675-2677 → { status:'completed', output: finalText(...) }
+  //   0.1.7-rc.2  dsh-subagent/lib/index.js:2694-2696 → { status:'completed', result: finalText(...) }
+  // 本测试对**真实** settleRun 跑，断言「两个字段名里至少有一个是字符串」——
+  // 这样无论本地依赖副本是哪个版本都成立，上游再改名则会红。
+  const run = {
+    result: Promise.resolve({ output: [{ type: 'text', text: '已更新 skill demo。' }], stopReason: 'completed' }),
+    dispose: async () => {}
+  }
+  const outcome = await settleRun(run)
+  assert.equal(outcome.status, 'completed')
+  const text = typeof outcome.result === 'string' ? outcome.result
+    : typeof outcome.output === 'string' ? outcome.output : undefined
+  assert.equal(typeof text, 'string', 'completed 分支必须带可读文本（result 或 output 之一）')
+  assert.equal(text, '已更新 skill demo。')
+  // 记录实测到的字段名，便于漂移时定位
+  const shape = outcome.result !== undefined ? 'result(0.1.7)' : 'output(0.1.5)'
+  assert.ok(shape, 'detected shape: ' + shape)
+})
+
+test('契约：settleRun 失败分支的 detail 字段', async () => {
+  const run = {
+    result: Promise.resolve({ output: [], stopReason: 'error', diagnostic: 'boom' }),
+    dispose: async () => {}
+  }
+  const outcome = await settleRun(run)
+  assert.equal(outcome.status, 'failed')
+  assert.match(String(outcome.detail), /boom/)
+})
 
 const completedRun = (text = '已更新 skill demo。') => ({
   result: Promise.resolve({ output: [{ type: 'text', text }], stopReason: 'completed' }),

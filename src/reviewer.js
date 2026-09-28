@@ -255,7 +255,17 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
   }
 
   const ok = outcome && outcome.status === 'completed'
-  const summary = (typeof (outcome && outcome.output) === 'string' ? outcome.output : '').trim()
+  // 字段名坑（2026-09-28 实机发现）：settleRun 成功时返回的是
+  //   { status:'completed', result: <最终文本> }
+  // —— 是 result，**不是** output（output 是子代理 run 内部 result 的字段名，
+  // 经 runOutcome() 扁平化后改叫 result）。原先读 outcome.output 恒为 undefined
+  // → summary 恒空 → 面板空白条目、自动 commit 的 message 也只剩 "skill-curator:"。
+  // 保留 output 兜底以兼容旧版 dsh 与测试 mock。
+  const raw = outcome
+    ? (typeof outcome.result === 'string' ? outcome.result
+      : typeof outcome.output === 'string' ? outcome.output : '')
+    : ''
+  const summary = raw.trim()
   const diagnostic = String((outcome && outcome.detail) || '')
   const isNothing = /无需保存|nothing to save/i.test(summary)
   return {
@@ -263,7 +273,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
     stopReason: outcome ? outcome.status : 'unknown',
     diagnostic,
     summary,
-    actions: isNothing || !ok ? [] : [summary],
+    actions: isNothing || !ok || !summary ? [] : [summary],
     ...(fallbackReason !== null ? { fallback: { reason: fallbackReason.slice(0, 300) } } : {})
   }
 }
