@@ -3,6 +3,12 @@
 > 一次性 Profile 安装、启动、全链路验证证据。初版 2026-09-10（dsh **0.1.5-rc.1** 适配轮），
 > 隔离 `DSH_HOME` + 独立端口，**未触碰任何已部署的 dsh 实例**（线上 3080 全程 mtime/状态核对未变）。
 
+> ⚠️ **本节记录的是 0.1.5-rc.1 那一轮的实机证据，尚未按 0.1.7-rc.2 重跑。**
+> 0.1.7 适配轮（2026-09-28）的改动已在本地测试层验证（`npm test`：单测 72 / smoke 11 组 /
+> client-smoke 8 组全绿，含 volatile 活引用、sha256 先读后改、写前备份、删除、保护名单、
+> `configForms`+`plugins.item` 接线、hooks 顺序守护），**但宿主内实机安装/启动/卸载三面
+> （pluginInventory/list · commands/list · __DSH_BOOT__.entries）需在 0.1.7 宿主上重跑后才可引用本节结论**。
+
 ## Environment
 
 | Item | Value |

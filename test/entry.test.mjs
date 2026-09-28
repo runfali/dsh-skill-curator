@@ -1,5 +1,5 @@
 /**
- * dsh-skill-curator — 宿主入口与声明契约守护测试（0.1.5-rc.1 适配轮新增）。
+ * dsh-skill-curator — 宿主入口与声明契约守护测试（0.1.7-rc.2 适配轮更新）。
  *
  * 历史教训（dsh-plugin-audit 的第 0/1/4 路盲区）：
  *   - \`node --check\` 只查语法不查模块解析；smoke 只测零依赖逻辑模块；client-smoke
@@ -30,14 +30,21 @@ assert.equal(typeof mod.apply, 'function', 'src/index.js 必须导出 apply 函�
 assert.equal(mod.name, 'skill-curator', 'Cordis 插件短名必须是 skill-curator')
 assert.ok(Array.isArray(mod.inject), '顶层 inject 必须是数组')
 assert.deepEqual([...mod.inject].sort(), ['settings', 'tools'], '顶层 inject 面必须恰为 settings + tools')
-ok('宿主入口真实 import 成功（apply / name / inject 面齐备）')
+// 0.1.7：设置命名空间 = cordis 行 id，宿主按 runtime.Config 枚举设置视图——
+// 不从插件模块导出 Config，插件页就不会出现配置入口（且完全静默）。
+// schemastery 的 Schema 是可调用对象（typeof 'function'）+ 带 ~standard 校验协议，
+// 宿主正是按 entry.fiber.runtime.Config 的 ~standard 校验并枚举 volatile 字段。
+assert.equal(typeof mod.Config, 'function', 'src/index.js 必须 re-export Config（0.1.7 设置契约）')
+assert.ok(mod.Config['~standard'] && typeof mod.Config['~standard'].validate === 'function', 'Config 必须是 schemastery schema（带 ~standard 校验协议）')
+assert.ok(mod.Config.dict && Object.keys(mod.Config.dict).length > 0, 'Config 必须声明字段（否则插件页无配置入口）')
+ok('宿主入口真实 import 成功（apply / name / inject / Config 面齐备）')
 
 // ---------------------------------------------------------------------------
 // 2. 声明面：版本号、exports、bundle 挂载三面、client 半
 // ---------------------------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 assert.equal(typeof pkg.version, 'string', 'package.json 缺 version')
-assert.equal(pkg.version, '0.1.5-rc.1', '版本号必须跟宿主发布号（家族惯例）')
+assert.equal(pkg.version, '0.1.7-rc.2', '版本号必须跟宿主发布号（家族惯例）')
 assert.equal(pkg.type, 'module', '必须是 ESM 包')
 assert.equal(pkg.exports['.'], './src/index.js', 'exports["."] 必须指向宿主入口')
 assert.equal(pkg.exports['./client'], './lib/client.js', 'exports["./client"] 必须指向 client bundle')
@@ -124,18 +131,23 @@ const TABLE = [
   ['0.1.5-rc.1', true],
   ['0.1.5', true],
   ['0.1.6', true],
+  ['0.1.7-alpha.0', true],
+  ['0.1.7-rc.1', true],
+  ['0.1.7-rc.2', true],
   ['0.1.3-alpha.1', false],
+  ['0.1.4', true],
   ['0.2.0', false],
   ['0.0.1', false]
 ]
 for (const [version, expected] of TABLE) {
   assert.equal(satisfies(version, range), expected, 'engines 区间对 ' + version + ' 的判定应为 ' + expected + '（区间=' + range + '）')
 }
-ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 覆盖）')
+ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 / 0.1.7-rc.2 覆盖）')
 
-// 反证：旧单区间不覆盖 0.1.5-rc.1 —— 这正是本次必须加析取的原因
+// 反证：旧单区间不覆盖预发布 —— 这正是必须加析取的原因
 assert.equal(satisfies('0.1.5-rc.1', '>=0.1.2-alpha.3 <0.2.0'), false, '旧单区间本不应覆盖 0.1.5-rc.1，判定器写反了')
-ok('反证：旧单区间不覆盖 0.1.5-rc.1（故必须加析取，非冗余声明）')
+assert.equal(satisfies('0.1.7-rc.2', '>=0.1.2-alpha.3 <0.2.0'), false, '旧单区间本不应覆盖 0.1.7-rc.2，判定器写反了')
+ok('反证：旧单区间不覆盖 0.1.5-rc.1 / 0.1.7-rc.2（故必须加析取，非冗余声明）')
 
 // 交叉验证：同一判定表与宿主真实 semver 逐行一致（宿主不可解析则显式跳过，不假绿）
 const req = createRequire(import.meta.url)
@@ -152,14 +164,18 @@ if (semver && typeof semver.satisfies === 'function') {
   ok('宿主 semver 不可解析，跳过交叉验证（不假绿）')
 }
 
-// 运行时依赖必须钉在同一发布号上（caret 语义在预发布下由 npm 自行判定：
-// ^0.1.5-rc.1 会解析到 0.1.5-rc.1 这一发布号，正是家族惯例「版本号跟宿主发布号」的落地面）。
-const dshDeps = Object.keys(pkg.dependencies || {}).filter((d) => d.startsWith('@deepseek-ai/dsh-'))
-assert.equal(dshDeps.length, 4, 'dsh 系运行时依赖应为 4 个（llm/settings/subagent/tools）')
-for (const dep of dshDeps) {
-  assert.equal(pkg.dependencies[dep], '^' + pkg.version, dep + ' 必须钉在 ' + pkg.version + '（家族惯例：版本号跟宿主发布号）')
+// 0.1.7 起 dsh-* 一律走 peerDependencies（宿主运行时是唯一事实来源，插件不再各自
+// 装一份 @deepseek-ai/dsh-* 实体副本——两份副本会让 defineTool/schemastery 身份分裂）。
+// devDependencies 里保留一份「源码级契约副本」，只为本地跑测试时能解析到真模块。
+const PEER = ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-settings', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-tools']
+assert.equal(pkg.dependencies, undefined, 'runtime dependencies 必须为空（dsh-* 全部走 peerDependencies）')
+for (const dep of PEER) {
+  const spec = (pkg.peerDependencies || {})[dep]
+  assert.equal(typeof spec, 'string', dep + ' 必须在 peerDependencies 里声明')
+  assert.ok(satisfies(pkg.version, spec), dep + ' 的 peer 区间必须覆盖当前版本 ' + pkg.version + '（区间=' + spec + '）')
+  assert.equal(typeof (pkg.devDependencies || {})[dep], 'string', dep + ' 需要 devDependencies 副本供本地测试解析')
 }
-ok('4 个 @deepseek-ai/dsh-* 运行时依赖均钉在 ^' + pkg.version)
+ok('4 个 @deepseek-ai/dsh-* 依赖面 = peer（区间覆盖 ' + pkg.version + '）+ dev 副本，runtime dependencies 为空')
 
 // ---------------------------------------------------------------------------
 // 4. 宿主服务名真实存在（顶层 inject 写错名 = 插件永远 pending，且完全静默）
@@ -194,6 +210,9 @@ assert.ok(fieldsBlock, 'lib/client.js 里找不到 FIELDS（键集合守卫失�
 const clientKeys = [...fieldsBlock[1].matchAll(/key: "([^"]+)"/g)].map((m) => m[1]).sort()
 assert.deepEqual(clientKeys, hostKeys, 'client FIELDS 键集合必须与 host Config 键集合逐键相等（缺一键 = 设置页调不到该开关）')
 assert.equal(hostKeys.length, 13, 'host Config 键数为 13（漂移则同步本断言与文档）')
+// 0.1.7 热编辑的前提：每个可编辑字段都必须 .volatile()（非 volatile = 改一次重启一次 fiber）
+const volatileCount = (configBlock[1].match(/\.volatile\(\)/g) || []).length
+assert.equal(volatileCount, hostKeys.length, 'host Config 全部字段都必须 .volatile()（' + volatileCount + '/' + hostKeys.length + '）')
 // 枚举字面量三处一致：host schema default / client 分段按钮选项 / 展示文案
 for (const literal of ['off', 'on', 'verbose']) {
   assert.ok(hostSrc.includes("'" + literal + "'"), 'host schema 缺 notifyMode 字面量 ' + literal)
@@ -209,10 +228,15 @@ for (const key of ['preinstall', 'install', 'postinstall', 'prepare', 'prepublis
   assert.equal(scripts[key], undefined, '包内不得声明安装类脚本副作用：' + key)
 }
 assert.equal(pkg.optionalDependencies, undefined, '不得声明 optionalDependencies')
-for (const dep of Object.keys(pkg.dependencies || {})) {
-  const allowed = dep.startsWith('@deepseek-ai/')
-  assert.ok(allowed, '运行时依赖只允许 @deepseek-ai/* 系列（零 gyp 风险）：' + dep)
+for (const dep of Object.keys(pkg.peerDependencies || {})) {
+  assert.ok(dep.startsWith('@deepseek-ai/'), 'peerDependencies 只允许 @deepseek-ai/* 系列（零 gyp 风险）：' + dep)
 }
+for (const dep of Object.keys(pkg.devDependencies || {})) {
+  assert.ok(dep.startsWith('@deepseek-ai/'), 'devDependencies 只允许 @deepseek-ai/* 系列：' + dep)
+}
+// 不装 @deepseek-ai/dsh 伞包：它会把整棵宿主依赖树（数百包）拖进插件仓，
+// 并往 pnpm-workspace.yaml 写一串 "set this to true or false" 噪声。源码里没有任何 import 用到它。
+assert.equal((pkg.devDependencies || {})['@deepseek-ai/dsh'], undefined, 'devDependencies 不得声明 @deepseek-ai/dsh 伞包')
 ok('依赖卫生：无安装脚本、无 optionalDependencies、依赖面仅 @deepseek-ai/*')
 
 console.log('\nentry OK: ' + PASS.length + ' 组守护通过（判定表 ' + TABLE.length + ' 行交叉验证）')

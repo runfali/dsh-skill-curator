@@ -22,10 +22,13 @@ const ok = (label) => { PASS.push(label); console.log('  ✓ ' + label) }
 function makeElement(type, props, ...children) {
   return { type, props: props || {}, children: children.flat().filter((c) => c !== null && c !== undefined) }
 }
+// hooks 调用签名记录器（审计第六路盲区）：组件里任何早退都会让两次渲染的
+// hooks 数量/顺序不同，真机 React 抛 "Rendered fewer hooks than expected"。
+const hookLog = []
 const reactStub = {
-  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
-  useEffect: () => {},
-  useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot()
+  useState: (init) => { hookLog.push('useState'); return [typeof init === 'function' ? init() : init, () => {}] },
+  useEffect: () => { hookLog.push('useEffect') },
+  useSyncExternalStore: (subscribe, getSnapshot) => { hookLog.push('useSyncExternalStore'); return getSnapshot() }
 }
 function makeJsx() {
   return (...args) => {
@@ -61,11 +64,29 @@ const registered = { locales: [], slots: [], scopeNamespaces: [], scope: null }
 const slotRegistrations = []
 const ctxStub = {
   effect: (fn) => { fn(); return () => {} },
-  locale: { register(ns, dict) { registered.locales.push({ ns, dict }) } },
-  settingsScope: {
-    bind({ namespace }) {
-      registered.scopeNamespaces.push(namespace)
-      const state = { status: 'ready', writable: true, value: { enabled: true, skillNudgeInterval: 3, notifyMode: 'on' }, user: {} }
+  locale: {
+    register(ns, dict) { registered.locales.push({ ns, dict }) },
+    // 0.1.7：卡片 label 走 locale thunk（ctx.locale.bind(NS)）
+    bind(ns) { return (key) => (registered.locales.find((l) => l.ns === ns)?.dict?.zh[key]) || key }
+  },
+  slots: {
+    // 0.1.7 槽位契约："settings.plugin.item"（keyed）→ "plugins.item"（list）。
+    // 注册回调返回 disposer（不是 generator）；whileServed 决定何时注册。
+    inject(slotName, register) {
+      assert.equal(slotName, 'plugins.item', 'slot name')
+      const reg = register()
+      slotRegistrations.push({ slotName, reg })
+      return () => {}
+    },
+    register(def, component) { return { def, component } }
+  },
+  configForms: {
+    // 0.1.7：settingsScope.bind → configForms.get(ns)，快照同形（status/value/user/writable）
+    // 且多出 base/revision/mode——Form 只读它认识的那几个键。
+    get(ns) {
+      registered.scopeNamespaces.push(ns)
+      if (registered.scope) return registered.scope
+      const state = { status: 'ready', writable: true, value: { enabled: true, skillNudgeInterval: 3, notifyMode: 'on' }, user: {}, revision: 0, mode: 'host' }
       const listeners = new Set()
       const scope = {
         getSnapshot: () => state,
@@ -75,15 +96,9 @@ const ctxStub = {
       }
       registered.scope = scope
       return scope
-    }
-  },
-  slots: {
-    inject(slotName, gen) {
-      assert.equal(slotName, 'settings.plugin.item', 'slot name')
-      const iterator = gen()
-      for (const reg of iterator) slotRegistrations.push({ slotName, reg })
     },
-    register(def, component) { return { def, component } }
+    // 宿主开始服务本命名空间才注册卡片（真实环境由 settings.describe 驱动）
+    whileServed(namespaces, register) { registered.served = namespaces.slice(); return register(new Set(namespaces)) }
   }
 }
 
@@ -108,17 +123,21 @@ vm.runInContext(bundleSource, fakeWindow, { filename: 'lib/client.js' })
 // 捕获 factory 内导出的 apply/inject：factory 通过 require('react') 闭包执行
 const captured = loaderStore.entry.factory.call(null, sandboxRequire)
 assert.equal(typeof captured.apply, 'function', 'apply exported')
-assert.equal(captured.inject.join(','), 'slots,locale,settingsScope', 'inject services')
+assert.equal(captured.inject.join(','), 'slots,locale,configForms', 'inject services (0.1.7)')
 captured.apply(ctxStub)
 ok('bundle id + apply executed')
 
 // ---- 断言 ----
-assert.equal(registered.scopeNamespaces[0], 'skill-curator', 'settingsScope namespace')
+assert.equal(registered.scopeNamespaces[0], 'skill-curator', 'configForms namespace')
+// 注意：bundle 在 vm 沙箱里执行，拿到的数组属于另一个 realm——用 JSON 比内容，不比原型
+assert.equal(JSON.stringify(registered.served), '["skill-curator"]', 'whileServed follows the skill-curator namespace')
 assert.equal(slotRegistrations.length, 1, 'one slot registration')
 const slot = slotRegistrations[0].reg.def
-assert.equal(slot.name, 'settings.plugin.item', 'slot name')
-assert.equal(slot.key, 'skill-curator', 'slot key')
+assert.equal(slot.name, 'plugins.item', 'slot name')
+assert.equal(slot.id, 'skill-curator', 'slot id')
 assert.equal(slot.locale, 'skill-curator', 'slot locale')
+assert.equal(typeof slot.order, 'number', 'slot order (list slot needs a stable sort key)')
+assert.equal(slot.label(), '技能策展（Skill Curator）', 'label is a locale-driven thunk')
 const Component = slotRegistrations[0].reg.component
 assert.equal(typeof Component, 'function', 'component captured')
 const injected = slot.inject()
@@ -126,14 +145,14 @@ assert.ok(injected.hooks && injected.hooks.curator && typeof injected.hooks.cura
 for (const fn of ['edit', 'toggle', 'resetField', 'discard', 'save']) {
   assert.equal(typeof injected[fn], 'function', `action ${fn}`)
 }
-ok('settingsScope + slot + actions')
+ok('configForms + plugins.item slot + actions')
 
 assert.equal(registered.locales.length, 1, 'one locale registration')
 const dict = registered.locales[0].dict
 const zhKeys = Object.keys(dict.zh)
 const enKeys = Object.keys(dict.en)
 assert.deepEqual(enKeys.sort(), zhKeys.sort(), 'zh/en key parity')
-const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'reviewBaseUrl', 'reviewApiKey', 'adoptSkills', 'notifyMode']
+const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'reviewBaseUrl', 'reviewApiKey', 'excludedSkills', 'notifyMode']
 for (const k of fieldKeys) {
   assert.ok(zhKeys.includes('field.' + k), `field.${k} label`)
   assert.ok(zhKeys.includes('hint.' + k), `hint.${k} hint`)
@@ -183,13 +202,17 @@ const injected2 = (() => {
 // 展开态组件的槽位注册需要完整 ctx——复用第一个 ctx 但 replace slot 捕获
 const ctxStub2 = {
   effect: (fn) => { fn(); return () => {} },
-  locale: { register() {} },
-  settingsScope: { bind({ namespace }) { return registered.scope } },
+  locale: { register() {}, bind(ns) { return (key) => (registered.locales.find((l) => l.ns === ns)?.dict?.zh[key]) || key } },
+  configForms: {
+    get() { return registered.scope },
+    whileServed(namespaces, register) { register(new Set(namespaces)); return () => {} }
+  },
   slots: {
-    inject(name, gen) {
-      const reg = gen().next().value
+    inject(name, register) {
+      const reg = register()
       registered.inject2 = reg.def.inject
       registered.Component2 = reg.component
+      return () => {}
     },
     register(def, component) { return { def, component } }
   }
@@ -205,6 +228,21 @@ assert.ok(renderedTags.includes('ul') || renderedTags.includes('p'), 'expanded: 
 const json = JSON.stringify(tree2)
 assert.ok(!json.includes('undefined'), 'no undefined leakage in render')
 ok('expanded render (FieldRow all branches, status panel)')
+
+// ---- hooks 顺序守护：summary / detail 视图切换不得改变 hooks 数量 ----
+// 注：useCurator 是框架注入的 selector hook（不经 react 模块），这里只记录真实 react hooks
+const detailHooks = hookLog.length
+assert.ok(detailHooks >= 1, 'detail view calls the component hooks (' + detailHooks + ')')
+hookLog.length = 0
+const summaryTree = makeElement(Component, {
+  t: (key) => dict.zh[key] || key,
+  useCurator: makeUseCurator(store),
+  ...injected,
+  view: 'summary'
+})
+renderTree(summaryTree)
+assert.equal(hookLog.length, detailHooks, 'summary view must call the SAME hooks before returning (no early return before hooks)')
+ok('hooks order stable across summary/detail views')
 
 // ---- 保存流程（staged → scope.set）----
 await injected.edit('skillNudgeInterval', '5')

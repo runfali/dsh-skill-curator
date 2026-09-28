@@ -1,6 +1,6 @@
 # dsh-skill-curator
 
-Automatic skill curation for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). After every N real conversation turns (default **3**), the plugin fires a background **subagent** that reads a digest of the session and **creates or updates `SKILL.md` files** under the user skills directory (`~/.dsh/skills/<name>/SKILL.md`) — the same self-improvement loop Nous Research's Hermes Agent runs, ported to DSH as a zero-intrusion bundle plugin.
+Automatic skill curation for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). After every N real conversation turns (default **3**), the plugin fires a background **subagent** that reads a digest of the session and **edits, merges, prunes and creates `SKILL.md` files** under the user skills directory (`~/.dsh/skills/`) — the same self-improvement loop Nous Research's Hermes Agent runs, ported to DSH as a zero-intrusion bundle plugin.
 
 > 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
@@ -17,15 +17,13 @@ session digest built ──▶ latest N messages verbatim + older turns compress
 spawn subagent (provider: spawn) with digest + review instructions
     │  toolFilter allow = skill-library-* only (whitelist, hermes-style)
     ▼
-subagent reviews and writes ~/.dsh/skills/<name>/SKILL.md
-    │  frontmatter is stamped author: dsh-skill-curator (ownership marker)
+subagent reads the library first → subtracts (merge / shorten / delete) before it adds
+    │  every write must echo the sha256 it just read (= hard read-before-write)
+    ▼
+writes ~/.dsh/skills/<name>/SKILL.md (Chinese body; original backed up first)
     ▼
 summary logged (host journal) + visible in the settings card status panel
 ```
-
-![Backstage review subagent in the Tasks panel](docs/screenshot/0-1.png)
-
-*The review subagent runs as a visible task in the Tasks panel — here you see queued/idle `skill review` entries; open the panel to watch a curation as it happens.*
 
 Manual trigger: `/skill-refine [focus]` runs a review of the current session immediately.
 
@@ -37,7 +35,7 @@ Manual trigger: `/skill-refine [focus]` runs a review of the current session imm
 | fork of AIAgent in a daemon thread | platform subagent (`ctx.subagents.start`) — visible in the UI, fully isolated session |
 | replay full conversation (warm prefix cache) | digest injection (tail-verbatim + head compression) — DSH has no cache advantage |
 | runtime tool whitelist (memory+skills) | `toolFilter.allow` whitelist + prompt constraint |
-| curator ownership markers | frontmatter `author: dsh-skill-curator` + `skill-library-adopt` |
+| edits only curator-created skills | the whole library is editable, guarded by read-before-write + auto-backup + a protected list |
 | `/refine` | `/skill-refine` command |
 
 Behavioral parity matrix: [docs/COMPARISON.md](docs/COMPARISON.md).
@@ -54,10 +52,6 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 
 ## Settings (Settings → Plugins tab → "Skill Curator" card)
 
-| Settings card (part 1) | Settings card (part 2) |
-|:---:|:---:|
-| ![Settings card 1/2](docs/screenshot/0-2.png) | ![Settings card 2/2](docs/screenshot/0-3.png) |
-
 - **enabled** — master switch (default on)
 - **skillNudgeInterval** — turns between reviews (default 3)
 - **notifyMode** — off / on / verbose (segmented buttons)
@@ -69,40 +63,57 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 - **reviewRetryCount** — extra retries when the final review attempt dies on endpoint/model-layer failures (connection reset, HTTP errors, timeouts) or a detail-less `killed`; `0` disables retrying. Tool-layer errors are never retried. Default 1
 - **reviewRetryDelayMs** — backoff base for retries, n-th retry waits `base × n` ms (default 5000)
 - **digestTail / digestMaxChars** — digest shape
-- **adoptSkills** — comma-separated names of skills the curator may maintain although created elsewhere
+- **excludedSkills** — comma-separated names the reviewer must never touch (empty = the whole library is editable)
 
 ## Skill library tools (whitelist)
 
-The review subagent can only call these six (they are also usable by any session):
+The review subagent can only call these seven (they are also usable by any session):
 
 | Tool | Purpose |
 |---|---|
-| `skill-library-list` | list skills (name, description, owned?) |
-| `skill-library-read` | read one SKILL.md |
+| `skill-library-list` | list skills (name, description, body line count, protected?) |
+| `skill-library-read` | read one SKILL.md in full + its **sha256** |
 | `skill-library-create` | create a class-level umbrella skill (Chinese body, bilingual description) |
 | `skill-library-patch` | targeted `oldString→newString` or whole-body replacement (frontmatter preserved) |
 | `skill-library-write-file` | support files under `references/` `templates/` `scripts/` |
-| `skill-library-adopt` | take ownership of an unowned skill (stamps the author marker) |
+| `skill-library-delete` | delete a redundant/merged-away skill (read-first; whole directory backed up) |
+| `skill-library-adopt` | stamp an externally authored skill with the author marker (provenance only) |
 
-Ownership guard: only skills stamped `author: dsh-skill-curator` or listed in `adoptSkills` can be patched; everything else is refused with an explicit "adopt first" message. Paths are boundary-checked; writes are atomic (tmp + rename).
+### Three guardrails
+
+1. **Read before write** — `patch` / `write-file` / `delete` must echo the `expectedSha256` returned by `skill-library-read`. Writing without reading, or writing against a file that changed since the read, is refused. This is the only mechanical defence against rewriting someone's skill from memory.
+2. **Backup before write** — every write/delete first copies the original (the whole skill directory on delete) to `~/.dsh/skill-curator/backups/`, keeping the latest 30, so a wrong move is recoverable.
+3. **Protected list** — skills in `excludedSkills` are read-only.
+
+Paths are boundary-checked; writes are atomic (tmp + rename). Bodies over 150 lines come back with a "move detail into `references/`" nudge in the tool result (advisory, never blocking).
+
+## How the reviewer writes skills (plain, not bloated)
+
+The review prompt carries a shape contract aimed squarely at "skills only ever grow":
+
+- **Subtract first** — priority slot 0 is "read the candidate skills, then delete duplicates, merge siblings, shorten stale parts". A deleted line counts as a result, usually the better one.
+- **Length** — body target ≤150 lines; past 250 the detail must move to `references/`. Standard skeleton: one-line conclusion → when to use → how → pitfalls → boundary.
+- **Language** — plain human wording; no background/foreword/summary/disclaimers, no restating common knowledge, every term explained in one clause, one fact stated once.
+- **Adding a section is the last resort** — rewrite an existing section before adding a new one.
 
 ## Requirements
 
 ```jsonc
 // package.json — machine-readable
-"engines": { "node": ">=22" },
-"dependencies": {
-  "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
-  "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
-  "@deepseek-ai/dsh-subagent": "^0.1.5-rc.1",
-  "@deepseek-ai/dsh-tools": "^0.1.5-rc.1",
-  "@deepseek-ai/schemastery": "^3.18.2"
+"engines": { "node": "^22.19.0 || >=24.0.0" },
+"peerDependencies": {          // the host runtime is the single source of truth; no bundled dsh-* copies
+  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8",
+  "@deepseek-ai/dsh-settings": "…same…",
+  "@deepseek-ai/dsh-subagent": "…same…",
+  "@deepseek-ai/dsh-tools":    "…same…",
+  "@deepseek-ai/schemastery":  "~3.18.4"     // .volatile() needs 3.18.4+
 },
-"dsh": { "engines": { "dsh": ">=0.1.2-alpha.3 <0.2.0 || >=0.1.5-alpha.1 <0.1.6" } }
+"devDependencies": { …local copies of the four dsh-* packages + schemastery… }  // no @deepseek-ai/dsh umbrella: it drags the whole host tree in
 ```
 
-- **Verified host**: `@deepseek-ai/dsh 0.1.5-rc.1` (Node v24).
-- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1`. `test/entry.test.mjs` pins this with a 10-row decision table, a counter-proof (reverting to the old single range turns red), and a cross-check against the host's real `semver.satisfies`.
+- **Verified host**: `@deepseek-ai/dsh 0.1.7-rc.2` (Node v24).
+- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1` or `0.1.7-rc.2`. `test/entry.test.mjs` pins this with a 14-row decision table, a counter-proof (reverting to the old single range turns red), and a cross-check against the host's real `semver.satisfies`.
+- **0.1.7 settings contract (what this adaptation was about)**: `settings.installSection` was removed from dsh-settings. The namespace **is** the cordis row id, `Config` must be exported from the plugin module, and every live-editable field must be `.volatile()` (the host's `_commitVolatile` rewrites the live reference in place, no fiber restart). The settings card therefore hangs off `configForms.get(ns)` and the `plugins.item` slot.
 - **No install scripts, no gyp/native deps**: the whole tree is plain ESM; `test/entry.test.mjs` guards this (no `install`/`postinstall`/`prepare`, no `optionalDependencies`, dependency scope limited to `@deepseek-ai/*`).
 
 ## Development

@@ -60,6 +60,39 @@
 
 ---
 
+# 第三轮：适配 dsh 0.1.7-rc.2（2026-09-28）
+
+> 审计对象：v0.1.7-rc.2（适配轮）· 宿主：`@deepseek-ai/dsh 0.1.7-rc.2`（Node v24）· 参考实现：`D:\DSH\dsh-prompt-injector`
+
+**契约核查方法**：逐包读宿主实码（运行时无 `.d.ts`，结论全部以 `lib/index.js` 行号为准），关键节点另经直接 import 实跑（`defineTool` 编译、`attributionHeaders()`、schemastery `~standard.validate`）。
+
+| 契约 | 0.1.7-rc.2 结论 | 处置 |
+|---|---|---|
+| `ctx.tools.register(defineTool(...))` 全字段 | 兼容（`dsh-tools/lib/index.js:838/848`，裸对象 `required:true` 仍支持） | 不改 |
+| `subagents.start('spawn', …)` / `toolFilter.allow` / `settleRun` 形状 | 兼容（`dsh-subagent/lib/index.js:2720`、`dsh-base/cordis.patch.yml:351`） | 不改 |
+| `agent/created` · `agent/turn-stopping` · `header.origin/delegationDepth` · `agents.list` · `commands` · `webServer` | 兼容 | 不改 |
+| `agent.session.snapshotEvents()` | 兼容但已 `@deprecated`（`dsh-session/lib/index.js:1330`） | P2 迁移项（现可用） |
+| `llm.registerAdapter` / `listProviders` / 鸭子方法面 / `attributionHeaders` | 兼容（六方法 0.1.5 与 0.1.7 逐条同名同序） | 不改 |
+| **`settings.installSection`** | **已移除**（全库 874 个运行时 .js 零命中） | P0 重写 `src/settings.js` |
+| **client `settingsScope`** | **已移除** | P0 改 `configForms.get(ns)` |
+| **client 槽位 `settings.plugin.item`** | **已移除** | P0 改 `plugins.item`（list 槽：id/order/label thunk）+ `whileServed` |
+
+**P0 修复**：
+1. `src/settings.js`：`Config` 全字段 `.volatile()` 并从模块导出；`apply` 内 `settings.configure({auto:false}, ctx.fiber)`；`mergeDefaults()` 用 schema 默认值补宿主未注入的缺省键——**漏了它 `enabled` 会是 undefined，自动评审被静默关掉**（本轮实测：单测从 20/24 直接红）。
+2. `src/index.js`：re-export `Config`（宿主按 `entry.fiber.runtime.Config` 枚举设置视图，不导出 = 插件页无入口）。
+3. `lib/client.js`：`configForms` + `plugins.item` + `view==='summary'` 分支；`adoptSkills` → `excludedSkills`。
+4. `package.json`：版本 `0.1.7-rc.2`；四个 `@deepseek-ai/dsh-*` 由 `dependencies` 移到 `peerDependencies`（宿主运行时是唯一事实来源），dev 保留本地副本；schemastery 提到 `~3.18.4`（`.volatile()` 3.18.4 才有）。
+
+**同轮功能需求（发哥提出）**：
+- **全库可改**：`writeGuard` 从「产权制」改为「保护名单制」——默认任何带 frontmatter 的 skill 均可增删改，只挡 `excludedSkills` 成员与无 frontmatter 文件。
+- **先读后改**：`skill-library-read` 返回 sha256；`patch/write-file/delete` 必须回传 `expectedSha256`（缺了连 SDK 参数校验都过不了；对不上直接拒）。
+- **新增 `skill-library-delete`**（第 7 个工具）：写前把整个技能目录备份到 `<DSH_HOME>/skill-curator/backups/`（保留 30 份）。
+- **评审提示词改为减法优先**：第 0 档 = 删/合并/精简，再加篇幅契约（≤150 行；>250 行必须下沉 `references/`）与通俗条款；工具返回值在正文超阈值时附下沉提醒。
+
+**验证**：`npm test` 全绿 —— 单测 71/71、smoke 11 组、client-smoke 7 组（覆盖 volatile 活引用、sha256 守卫、写前备份、删除、保护名单、0.1.7 槽位/服务接线）。
+
+---
+
 # 第二轮：适配 dsh 0.1.5-rc.1（2026-09-10）
 
 > 审计时间：2026-09-10 · 对象：v0.1.5-rc.1（适配轮）· 宿主：@deepseek-ai/dsh **0.1.5-rc.1**

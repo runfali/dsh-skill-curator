@@ -18,6 +18,8 @@
  *   - 评审子代理是独立 session，绝不往父会话写任何事件（无污染）；
  *   - 摘要而非全量会话注入（控制成本）；
  *   - 每次尝试独立超时兜底；settleRun 永不 reject（失败转 status）。
+ *   - 0.1.7-rc.2 契约：settleRun 仍从包根导出（dsh-subagent/lib/index.js:3201），
+ *     返回 { status:'completed'|'killed'|'failed', output?, detail? }，与 0.1.5 同名同形。
  */
 import { settleRun } from '@deepseek-ai/dsh-subagent'
 import { TOOL_NAMES } from './skill-tools.js'
@@ -247,7 +249,9 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
     if (!retryable) break
     if (retryDelay > 0) await new Promise((r) => setTimeout(r, retryDelay * attempt))
     ctx.logger?.info?.(`skill-curator: review retry ${attempt}/${retryMax} after ${outcome.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`)
-    outcome = await runOnce(subagents, provider, baseRequest, timeoutMs)
+    // 重试仍带模型覆盖：端点恢复后就能继续用专用评审模型/自定义端点，
+    // 不必等下一次评审；回退只发生在「确实跑不动」时（去掉覆盖再跑）。
+    outcome = await runOnce(subagents, provider, fallbackReason !== null ? baseRequest : overrideRequest, timeoutMs)
   }
 
   const ok = outcome && outcome.status === 'completed'

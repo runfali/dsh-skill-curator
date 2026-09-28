@@ -1,4 +1,4 @@
-# dsh-skill-curator 自动技能策展 bundle 插件
+# dsh-skill-curator 自动技能策展 bundle 插件（dsh 0.1.7 适配）
 #
 # 安装（标准 bundle 插件，不改 dsh 源码；安装/卸载后重启 dsh 生效）：
 #   dsh plugin --profile web add ./dsh-skill-curator
@@ -7,15 +7,18 @@
 #
 # 功能：
 #   1. 每 N 轮对话（默认 3）后，后台起一个评审子代理阅读会话历史，
-#      主动创建/更新 ~/.dsh/skills/ 下的 SKILL.md（中文正文 + 双语描述）
+#      自主增删改 ~/.dsh/skills/ 下的 SKILL.md（中文正文 + 双语描述）
 #   2. 评审子代理被 toolFilter 白名单限制，只能调用插件注册的
-#      skill-library-* 工具（list/read/create/patch/write-file），
+#      skill-library-* 工具（list/read/create/patch/write-file/delete/adopt），
 #      其他工具在子代理 prompt 与执行层均不可见
-#   3. 设置 → 技能策展 卡片：开关/间隔/通知/模型覆盖/收养清单
-#   4. 产权保护：只更新插件自己创建的（frontmatter author 盖章）或
-#      用户显式收养的 skill，其余只读
+#   3. 设置 → 技能策展 卡片：开关/间隔/通知/模型覆盖/保护名单（热改即生效）
+#   4. 安全网：写前必须 skill-library-read 回传 sha256（先读后改），
+#      每次写入/删除前自动备份到 <DSH_HOME>/skill-curator/backups/
 #
-# 配置覆盖（追加到 ~/.dsh/profiles/web/cordis.patch.yml，整段替换 config）：
+# ⚠️ 行 id 必须是 skill-curator：dsh 0.1.7 起设置命名空间 = cordis 行 id
+#    （installSection 已移除），改名会让宿主的设置视图与插件页面错位。
+#
+# 配置覆盖（追加到 ~/.dsh/profiles/<profile>/cordis.patch.yml，整段替换 config）：
 # - id: skill-curator
 #   config:
 #     skillsRoot: ""     # 技能根目录；空 = <DSH_HOME>/skills

@@ -41,14 +41,19 @@ test('review prompt: digest first, then instructions, focus appended', () => {
   assert.ok(!p2.includes('## 用户明确要求'), 'no focus → no clause')
 })
 
-test('review instructions contain hermes-derived guardrails', () => {
+test('review instructions carry the curation guardrails', () => {
   for (const clause of [
+    // 形态与工具面
     '类级', 'references/', 'templates/', 'scripts/',
-    'skill-library-list', 'skill-library-adopt',
-    '无需保存', '否定断言', '中文', 'author: dsh-skill-curator',
-    'ACTIVE', '旧 24 条' // 无此条款，防呆：确保只查真实条款
+    'skill-library-list', 'skill-library-read', 'skill-library-create',
+    'skill-library-patch', 'skill-library-write-file', 'skill-library-delete', 'skill-library-adopt',
+    // 减法优先 + 通俗不堆砌（2026-09 发哥新增要求）
+    '先做减法', '合并', '篇幅', '通俗', '说人话',
+    // 写入机制
+    '先读后改', 'expectedSha256', 'backups',
+    // 基线条款
+    '无需保存', '否定断言', '中文', 'ACTIVE'
   ]) {
-    if (clause === '旧 24 条') continue
     assert.ok(REVIEW_INSTRUCTIONS.includes(clause), `instructions contain ${clause}`)
   }
 })

@@ -5,8 +5,8 @@
  * 真实加载 @deepseek-ai/dsh-settings / dsh-tools（经 node_modules symlink），
  * mock cordis ctx（effect/on/inject/settings/tools/logger/get），
  * 验证：
- * 1. apply 全链路注册（6 工具经真实 defineTool 编译、agent/created 监听、
- *    /skill-refine 命令、status 接口）
+ * 1. apply 全链路注册（7 工具经真实 defineTool 编译、agent/created 监听、
+ *    /skill-refine 命令、status 接口、设置命名空间 configure）
  * 2. 触发链路：agent/created → turn-stopping ×3 → 异步评审调度（mock subagents）
  * 3. 子代理排除：header.origin==='subagent' / delegationDepth>0 不计数
  * 4. enabled=false 不触发；interval 动态生效
@@ -29,23 +29,19 @@ const { apply, name } = mod
 const reviewLog = mod.reviewLog
 import { Config } from '../src/settings.js'
 
-/** 手工把 base 与 schema 默认值合并（模拟 settings 解析结果）。 */
-function resolveConfig(schema, base = {}) {
-  const jsonSchema = typeof schema === 'function' ? null : schema
-  void jsonSchema
-  const merged = {
-    enabled: true,
-    skillNudgeInterval: 3,
-    digestTail: 24,
-    digestMaxChars: 30000,
-    reviewTimeoutMs: 900000,
-    reviewProvider: '',
-    reviewModel: '',
-    adoptSkills: [],
-    notifyMode: 'on',
-    ...base
-  }
-  return merged
+// 0.1.7 起设置值不再经 settings 服务读回：apply 收到的 config 里，可热编辑字段
+// 是 {get()} 活引用（宿主 _commitVolatile 原地写入），普通字段是裸值。
+// 名字仍导出着，防止有测试把它当 schema 用。
+void Config
+
+/**
+ * 0.1.7 语义助手：config 里的每个字段都变成 `{get()}` 活引用，
+ * 与宿主 `_commitVolatile` 注入运行中 fiber 的形状一致。
+ */
+function live(config = {}) {
+  const out = {}
+  for (const [key, value] of Object.entries(config)) out[key] = { get: () => value }
+  return out
 }
 
 function makeCtx(config = {}) {
@@ -55,7 +51,7 @@ function makeCtx(config = {}) {
   const commands = []
   const routes = []
   const agentCtxs = []
-  let scopeValue = resolveConfig(Config, config)
+  const presentations = []
 
   const ctx = {
     fiber: { state: 0 },
@@ -76,21 +72,12 @@ function makeCtx(config = {}) {
     },
     inject(services, cb) { cb(ctx) },
     settings: {
-      // dsh 0.1.2-alpha.3：宿主 settings provider 暴露 installSection(owner, ns, schema, entry, hooks)，
-      // 语义 = register(base=entry) → setSource(scope.get) → onChange() 同步首发 → scope.watch 持续通知。
-      // （installSettingsSection 独立帮助函数已移除，测试 mock 同步升级。）
-      installSection(owner, ns, schema, entry, hooks) {
-        scopeValue = resolveConfig(schema, entry || config)
-        if (hooks && typeof hooks.setSource === 'function') hooks.setSource(() => scopeValue)
-        if (hooks && typeof hooks.onChange === 'function') hooks.onChange()
-        return { get: () => scopeValue, watch: () => () => {} }
-      },
-      register(ns, schema, options) {
-        scopeValue = resolveConfig(schema, (options && options.base) || config)
-        if (options && typeof options.setSource === 'function') {
-          options.setSource(() => scopeValue)
-        }
-        return { get: () => scopeValue, watch: () => () => {} }
+      // dsh 0.1.7：installSection / register 均已从 dsh-settings 移除（全库 0 命中），
+      // 只剩 configure(presentation, owner) —— 注册设置页展示策略。
+      // 设置值不再经 settings 读回：apply 直接收到 config 对象，volatile 字段是 {get()} 活引用。
+      configure(presentation, owner) {
+        presentations.push({ presentation, owner })
+        return () => {}
       }
     },
     get(key) {
@@ -112,7 +99,7 @@ function makeCtx(config = {}) {
       agentCtxs.push({ agent, listeners: actxListeners })
       return actx
     },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, setScope: (v) => { scopeValue = v }, getScope: () => scopeValue }
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations }
   }
   return ctx
 }
@@ -142,12 +129,43 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   const env = makeCtx({})
   apply(env, {})
   const t = env.__test
-  assert.equal(t.tools.length, 6, 'six skill-library tools registered')
+  assert.equal(t.tools.length, 7, 'seven skill-library tools registered')
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
   assert.equal(t.commands.length, 1, '/skill-refine registered')
   assert.equal(t.commands[0].name, 'skill-refine')
   assert.equal(t.routes.length, 1, 'status route registered')
   assert.equal(t.routes[0].path, '/api/skill-curator/status')
+  // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
+  assert.equal(t.presentations.length, 1, 'settings.configure called once')
+  assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
+})
+
+test('tools read live (dereferenced) config: excludedSkills works as a protection list', async () => {
+  // 回归：excludedSkills 是 volatile 活引用。若工具注册时传 base()（原始 config），
+  // Array.isArray({get:…}) === false → 保护名单静默失效（写入保护形同虚设）。
+  const dir = mkdtempSync(join(tmpdir(), 'sc-live-'))
+  const env = makeCtx({})
+  env.get = () => undefined
+  let excluded = ['keep-me']
+  apply(env, { skillsRoot: dir, excludedSkills: { get: () => excluded } })
+  const t = env.__test
+  const tool = (name) => t.tools.find((d) => d.name === name)
+  const sig = { signal: new AbortController().signal }
+
+  const created = await tool('skill-library-create').execute(
+    { name: 'keep-me', description: 'd', content: '# x' }, sig)
+  assert.equal(created.ok, false, 'live excludedSkills blocks creation')
+  assert.ok(created.error.includes('excludedSkills'))
+
+  const okCreate = await tool('skill-library-create').execute(
+    { name: 'free-one', description: 'd', content: '# x' }, sig)
+  assert.equal(okCreate.ok, true, 'non-member still writable')
+
+  // 活引用之后变化也要生效（热改保护名单）
+  excluded = []
+  const nowOk = await tool('skill-library-create').execute(
+    { name: 'keep-me', description: 'd', content: '# x' }, sig)
+  assert.equal(nowOk.ok, true, 'clearing the live list unblocks writes')
 })
 
 test('trigger chain: 3 turns fire one review via mocked subagents', async () => {
@@ -193,10 +211,11 @@ test('trigger chain: 3 turns fire one review via mocked subagents', async () => 
   await new Promise((r) => setTimeout(r, 10)) // 微任务调度
   assert.equal(started.length, 1, 'review spawned at interval')
   assert.equal(started[0].provider, 'spawn')
-  assert.deepEqual(started[0].toolFilter.allow.length >= 6, true, 'whitelist present')
+  assert.equal(started[0].toolFilter.allow.length, 7, 'whitelist lists all seven tools')
   const promptText = started[0].prompt.map((b) => b.text || '').join('\n')
   assert.ok(promptText.includes('第一轮提问'), 'digest contains user turn')
   assert.ok(promptText.includes('技能策展子代理'), 'instructions appended')
+  assert.ok(promptText.includes('skill-library-delete'), 'delete tool advertised to the reviewer')
 
   // 结果落 reviewLog
   await new Promise((r) => setTimeout(r, 10))
@@ -239,24 +258,26 @@ test('enabled=false suppresses trigger; interval change applies live', async () 
     }
     return undefined
   }
-  apply(env, { skillNudgeInterval: 2 })
+  const toggles = { enabled: true, skillNudgeInterval: 2 }
+  const toggle = (key, value) => { toggles[key] = value }
+  apply(env, { enabled: { get: () => toggles.enabled }, skillNudgeInterval: { get: () => toggles.skillNudgeInterval } })
   const t = env.__test
   const agent = makeAgent(env)
   await emitOn(t.listeners, 'agent/created', { agent })
 
-  t.setScope({ ...t.getScope(), enabled: false })
+  toggle('enabled', false)
   await emitOn(t.agentCtxs[0].listeners, 'agent/turn-stopping', { turn: 1 })
   await emitOn(t.agentCtxs[0].listeners, 'agent/turn-stopping', { turn: 2 })
   assert.equal(started.length, 0, 'disabled → no review')
 
-  t.setScope({ ...t.getScope(), enabled: true })
+  toggle('enabled', true)
   await emitOn(t.agentCtxs[0].listeners, 'agent/turn-stopping', { turn: 3 }) // bump 1
   await emitOn(t.agentCtxs[0].listeners, 'agent/turn-stopping', { turn: 4 }) // bump 2 → fire
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(started.length, 1, 'fires at interval=2 after re-enable')
 
   // 动态间隔：改为 5 后（计数已清零）连续 4 轮不再触发
-  t.setScope({ ...t.getScope(), skillNudgeInterval: 5 })
+  toggle('skillNudgeInterval', 5)
   for (let i = 5; i <= 8; i++) await emitOn(t.agentCtxs[0].listeners, 'agent/turn-stopping', { turn: i })
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(started.length, 1, 'interval change applied to live agent')
@@ -278,7 +299,7 @@ test('empty-status session (no user/model turns) never spawns review', async () 
     }
     return undefined
   }
-  apply(env, { skillNudgeInterval: 1 })
+  apply(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   // 会话 events 只有 tool 结果与插件注入，没有 user/model 回合
   const session = {
@@ -315,7 +336,7 @@ test('alpha.4 session shape (snapshotEvents, no events property) still spawns re
     }
     return undefined
   }
-  apply(env, { skillNudgeInterval: 1 })
+  apply(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   // dsh 0.1.2-alpha.4 真实形状：session 只有 snapshotEvents()，读 events 属性为
   // undefined——修复前摘要恒空，每次评审被静默跳过（无记录、无日志）
@@ -353,7 +374,7 @@ test('legacy session shape (plain events array) keeps working via fallback', asy
     }
     return undefined
   }
-  apply(env, { skillNudgeInterval: 1 })
+  apply(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   const agent = makeAgent(env, { legacyEvents: true })
   await emitOn(t.listeners, 'agent/created', { agent })
@@ -384,7 +405,7 @@ test('mutual exclusion: concurrent triggers are skipped', async () => {
     }
     return undefined
   }
-  apply(env, { skillNudgeInterval: 1 })
+  apply(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   const agent = makeAgent(env)
   await emitOn(t.listeners, 'agent/created', { agent })

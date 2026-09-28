@@ -9,23 +9,23 @@
  *   2. 评审：起一个 spawn 子代理，注入「会话摘要 + 评审指令」；toolFilter
  *      allow 白名单把它限制为只能调用 skill-library-* 工具（hermes 运行时
  *      白名单的工具级等价物）；结果经日志/状态面板回显，不污染父会话。
- *   3. 写盘：~/.dsh/skills/<name>/SKILL.md（中文正文 + 双语描述），frontmatter
- *      盖 author 章做产权标记；只更新插件创建或用户收养的 skill。
+ *   3. 写盘：~/.dsh/skills/<name>/SKILL.md（中文正文 + 双语描述）。评审可对库内
+ *      任意 skill 增删改（excludedSkills 保护名单除外）：动笔前必须 skill-library-read
+ *      取 sha256 并在写入时回传（硬约束「先读后改」），每次写入前自动备份。
  *   4. 手动：/skill-refine [focus] 命令立即对当前会话发起评审。
  *
  * 已知平台约束（docs/COMPARISON.md）：
  *   - 触发计数用 agent/created 闭包注册 agent.ctx 子监听（scoped 监听天然多会话隔离）；
- *     turn-stopping 载荷经 agentEvents 的 fused() 注入 agent（0.1.5-rc.1 源码核对：
- *     dsh-agent-loop 的 dispatch.serial("agent/turn-stopping", {turn,signal}) 走
- *     agent-scoped carrier，载荷实为 {agent,turn,signal}），但闭包取 agent 同样正确，
- *     且不依赖该字段的稳定性；
+ *     turn-stopping 载荷经 agentEvents 的 fused() 注入 agent（0.1.7-rc.2 源码核对：
+ *     dsh-agent-loop/lib/index.js:984 dispatch.serial("agent/turn-stopping", {turn,signal})
+ *     走 agent-scoped carrier），但闭包取 agent 同样正确，不依赖该字段的稳定性；
  *   - 回调里不往父会话注入任何事件（防污染会话历史与记忆）；
  *   - 评审异步执行，与主线完全解耦。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { createSettings } from './settings.js'
+import { Config, createSettings } from './settings.js'
 import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
@@ -38,6 +38,10 @@ export const name = 'skill-curator'
 
 /** 需要这些服务就绪再 apply。 */
 export const inject = ['settings', 'tools']
+
+// 0.1.7 起设置命名空间注册已移除：Config 必须从插件模块导出（宿主按 runtime.Config
+// 枚举设置视图），命名空间 = cordis 行 id 'skill-curator'。未导出 = 插件页无配置入口。
+export { Config }
 
 /** 插件版本（读自 package.json，状态接口回显用）。 */
 const VERSION = (() => {
@@ -79,9 +83,12 @@ export function apply(ctx, config = {}) {
   }
 
   // ---------------------------------------------------------------------
-  // 工具注册：skill-library-*（全局注册；语义无害，只写插件自有/收养的 skill）
+  // 工具注册：skill-library-*（全局注册；语义无害，写入受 excludedSkills 与「先读后改」约束）
   // ---------------------------------------------------------------------
-  for (const definition of createSkillToolDefinitions(() => settings.base())) {
+  // 注意：必须传 spec()（已解引用 volatile 活引用），不能传 base()（原始 config）。
+  // base() 里的 excludedSkills 是 {get()} 对象，Array.isArray 判为 false →
+  // 保护名单会静默失效（写入保护形同虚设）。skillsRoot/backupRoot 是普通字段，spec() 同样带出。
+  for (const definition of createSkillToolDefinitions(() => settings.spec())) {
     ctx.tools.register(definition)
   }
   ctx.logger.info(
@@ -187,7 +194,7 @@ export function apply(ctx, config = {}) {
   }
 
   // 全局监听 agent/created（载荷 {agent}），在 agent 级 scoped ctx 上注册
-  // turn-stopping。0.1.5-rc.1 源码核对：该事件经 agentEvents 的 fused() 注入 agent
+  // turn-stopping。0.1.7-rc.2 源码核对（dsh-agent-loop/lib/index.js:984）：该事件经 agentEvents 的 fused() 注入 agent
   // （载荷 {agent, turn, signal}），但会话标识仍从闭包拿——不依赖事件字段，更稳。
   // cordis 的 on 第三参数是过滤器，绝不能当 label 传。
   // 计数按 sessionId（非 agent 对象）维护：agent 重建（/compact、会话恢复）时继承计数，
