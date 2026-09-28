@@ -67,23 +67,27 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 
 ## Skill library tools (whitelist)
 
-The review subagent can only call these seven (they are also usable by any session):
+The review subagent can only call these ten (they are also usable by any session):
 
 | Tool | Purpose |
 |---|---|
 | `skill-library-list` | list skills (name, description, body line count, protected?) |
-| `skill-library-read` | read one SKILL.md in full + its **sha256** |
+| `skill-library-read` | read **any file** (SKILL.md, or a support file via `filePath`) + **that file's own sha256** |
+| `skill-library-tree` | list every file in a skill (lines/size) — see what you actually wrote |
 | `skill-library-create` | create a class-level umbrella skill (Chinese body, bilingual description) |
 | `skill-library-patch` | targeted `oldString→newString` or whole-body replacement (frontmatter preserved) |
-| `skill-library-write-file` | support files under `references/` `templates/` `scripts/` |
+| `skill-library-write-file` | support files; **overwriting an existing file backs up its previous content** |
+| `skill-library-delete-file` | delete one support file (read-first; backed up) |
 | `skill-library-delete` | delete a redundant/merged-away skill (read-first; whole directory backed up) |
 | `skill-library-adopt` | stamp an externally authored skill with the author marker (provenance only) |
+| `skill-library-git` | self-check the library repo: **status / diff / log** (no push, no reset, never a shell) |
 
-### Three guardrails
+### Four guardrails
 
 1. **Read before write** — `patch` / `write-file` / `delete` must echo the `expectedSha256` returned by `skill-library-read`. Writing without reading, or writing against a file that changed since the read, is refused. This is the only mechanical defence against rewriting someone's skill from memory.
 2. **Backup before write** — every write/delete first copies the original (the whole skill directory on delete) to `~/.dsh/skill-curator/backups/`, keeping the latest 30, so a wrong move is recoverable.
 3. **Protected list** — skills in `excludedSkills` are read-only.
+4. **Git backstop** — at the end of every review the plugin **auto-commits** the library (message = change summary + session id), so every review leaves a rollback point. A failed commit only warns and never affects the review result; a non-git skills root is skipped with a recorded reason.
 
 Paths are boundary-checked; writes are atomic (tmp + rename). Bodies over 150 lines come back with a "move detail into `references/`" nudge in the tool result (advisory, never blocking).
 

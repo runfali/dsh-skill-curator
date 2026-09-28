@@ -52,6 +52,10 @@ function makeCtx(config = {}) {
   const routes = []
   const agentCtxs = []
   const presentations = []
+  // 隔离：apply 时不给 skillsRoot，autoCommit 会落到**真实** ~/.dsh/skills 上提交。
+  // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
+  const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
+  const backupRoot = mkdtempSync(join(tmpdir(), 'sc-apply-backup-'))
 
   const ctx = {
     fiber: { state: 0 },
@@ -99,7 +103,7 @@ function makeCtx(config = {}) {
       agentCtxs.push({ agent, listeners: actxListeners })
       return actx
     },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations }
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, skillsRoot, backupRoot }
   }
   return ctx
 }
@@ -125,11 +129,22 @@ function makeAgent(ctx, { origin, delegationDepth, legacyEvents } = {}) {
 
 const emitOn = (listeners, event, ...args) => Promise.all((listeners.get(event) || []).map((cb) => cb(...args)))
 
+/**
+ * 带隔离技能根的 apply。
+ *
+ * 为什么必须有：插件收尾的 autoCommit 会真的在 skillsRoot 里跑 git commit。
+ * 测试若不给 skillsRoot，就会落到**真实** ~/.dsh/skills 上提交（2026-09-28 实测踩过，
+ * 产生了两条垃圾提交）。这里统一兜底，任何测试都不可能再写真实技能库。
+ */
+function applyIn(env, config = {}) {
+  return apply(env, { skillsRoot: env.__test.skillsRoot, backupRoot: env.__test.backupRoot, ...config })
+}
+
 test('apply registers full chain (tools/listener/command/route)', async () => {
   const env = makeCtx({})
-  apply(env, {})
+  applyIn(env, {})
   const t = env.__test
-  assert.equal(t.tools.length, 7, 'seven skill-library tools registered')
+  assert.equal(t.tools.length, 10, 'ten skill-library tools registered')
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
   assert.equal(t.commands.length, 1, '/skill-refine registered')
   assert.equal(t.commands[0].name, 'skill-refine')
@@ -147,7 +162,7 @@ test('tools read live (dereferenced) config: excludedSkills works as a protectio
   const env = makeCtx({})
   env.get = () => undefined
   let excluded = ['keep-me']
-  apply(env, { skillsRoot: dir, excludedSkills: { get: () => excluded } })
+  applyIn(env, { skillsRoot: dir, excludedSkills: { get: () => excluded } })
   const t = env.__test
   const tool = (name) => t.tools.find((d) => d.name === name)
   const sig = { signal: new AbortController().signal }
@@ -191,7 +206,7 @@ test('trigger chain: 3 turns fire one review via mocked subagents', async () => 
     if (key === 'commands') return { register() { return () => {} } }
     return undefined
   }
-  apply(env, {})
+  applyIn(env, {})
   const t = env.__test
 
   // 模拟一个真人 agent 发布
@@ -211,16 +226,25 @@ test('trigger chain: 3 turns fire one review via mocked subagents', async () => 
   await new Promise((r) => setTimeout(r, 10)) // 微任务调度
   assert.equal(started.length, 1, 'review spawned at interval')
   assert.equal(started[0].provider, 'spawn')
-  assert.equal(started[0].toolFilter.allow.length, 7, 'whitelist lists all seven tools')
+  assert.equal(started[0].toolFilter.allow.length, 10, 'whitelist lists all ten tools')
   const promptText = started[0].prompt.map((b) => b.text || '').join('\n')
   assert.ok(promptText.includes('第一轮提问'), 'digest contains user turn')
   assert.ok(promptText.includes('技能策展子代理'), 'instructions appended')
   assert.ok(promptText.includes('skill-library-delete'), 'delete tool advertised to the reviewer')
+  assert.ok(promptText.includes('skill-library-git'), 'git self-check tool advertised')
+  assert.ok(promptText.includes('skill-library-tree'), 'tree tool advertised')
 
-  // 结果落 reviewLog
-  await new Promise((r) => setTimeout(r, 10))
+  // 结果落 reviewLog。注意给足时间：收尾 autoCommit 是异步 git 调用，
+  // 固定 10ms 会在慢盘上偶发抢跑（轮询到出现为止，2s 上限）。
+  const deadline = Date.now() + 2000
+  while (reviewLog.recent().length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20))
+  }
   const recent = reviewLog.recent()
   assert.ok(recent.length >= 1, 'review logged')
+  // 收尾自动提交：测试根不是 git 库 → 明确记录原因而不是崩
+  assert.equal(recent[0].commit.committed, false, 'non-git skills root → no commit')
+  assert.ok(String(recent[0].commit.reason).includes('not a git work tree'), 'reason recorded')
   assert.equal(recent[0].ok, true)
   assert.ok(recent[0].actions[0].includes('demo-flow'), 'summary surfaced')
 })
@@ -228,7 +252,7 @@ test('trigger chain: 3 turns fire one review via mocked subagents', async () => 
 test('subagent-origin and delegated agents never trigger', async () => {
   const env = makeCtx({})
   env.get = () => ({ register() { return () => {} } })
-  apply(env, {})
+  applyIn(env, {})
   const t = env.__test
 
   const subAgent = makeAgent(env, { origin: 'subagent' })
@@ -260,7 +284,7 @@ test('enabled=false suppresses trigger; interval change applies live', async () 
   }
   const toggles = { enabled: true, skillNudgeInterval: 2 }
   const toggle = (key, value) => { toggles[key] = value }
-  apply(env, { enabled: { get: () => toggles.enabled }, skillNudgeInterval: { get: () => toggles.skillNudgeInterval } })
+  applyIn(env, { enabled: { get: () => toggles.enabled }, skillNudgeInterval: { get: () => toggles.skillNudgeInterval } })
   const t = env.__test
   const agent = makeAgent(env)
   await emitOn(t.listeners, 'agent/created', { agent })
@@ -299,7 +323,7 @@ test('empty-status session (no user/model turns) never spawns review', async () 
     }
     return undefined
   }
-  apply(env, live({ skillNudgeInterval: 1 }))
+  applyIn(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   // 会话 events 只有 tool 结果与插件注入，没有 user/model 回合
   const session = {
@@ -336,7 +360,7 @@ test('alpha.4 session shape (snapshotEvents, no events property) still spawns re
     }
     return undefined
   }
-  apply(env, live({ skillNudgeInterval: 1 }))
+  applyIn(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   // dsh 0.1.2-alpha.4 真实形状：session 只有 snapshotEvents()，读 events 属性为
   // undefined——修复前摘要恒空，每次评审被静默跳过（无记录、无日志）
@@ -374,7 +398,7 @@ test('legacy session shape (plain events array) keeps working via fallback', asy
     }
     return undefined
   }
-  apply(env, live({ skillNudgeInterval: 1 }))
+  applyIn(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   const agent = makeAgent(env, { legacyEvents: true })
   await emitOn(t.listeners, 'agent/created', { agent })
@@ -405,7 +429,7 @@ test('mutual exclusion: concurrent triggers are skipped', async () => {
     }
     return undefined
   }
-  apply(env, live({ skillNudgeInterval: 1 }))
+  applyIn(env, live({ skillNudgeInterval: 1 }))
   const t = env.__test
   const agent = makeAgent(env)
   await emitOn(t.listeners, 'agent/created', { agent })
@@ -439,7 +463,7 @@ test('/skill-refine command schedules with focus', async () => {
     }
     return undefined
   }
-  apply(env, {})
+  applyIn(env, {})
   const cmd = env.__cmd
   const agent = makeAgent(env)
   await emitOn(env.__test.listeners, 'agent/created', { agent })
@@ -455,7 +479,7 @@ test('historyPath override rebuilds store immediately (P2-1)', async () => {
   const env = makeCtx({})
   const dir = mkdtempSync(join(tmpdir(), 'sc-hist-'))
   const target = join(dir, 'custom-reviews.json')
-  apply(env, { historyPath: target })
+  applyIn(env, { historyPath: target })
   // 重建后 path 立即指向覆盖路径（经 mod 读 live binding——reviewLog 是 export let）
   assert.equal(mod.reviewLog.path, target, 'store path must switch in-process')
   mod.reviewLog.record({ at: new Date().toISOString(), sessionId: 'x', ok: true, actions: ['a'] })
@@ -479,7 +503,7 @@ test('turn counter inherited across agent re-creation per sessionId (P2-2)', asy
     }
     return undefined
   }
-  apply(env, {})
+  applyIn(env, {})
   const t = env.__test
   // 第一次 agent：2 轮（不触发）
   const agent1 = makeAgent(env)
@@ -515,7 +539,7 @@ test('stale agent disposed must not drop inherited counter (P2-2 race)', async (
     }
     return undefined
   }
-  apply(env, {})
+  applyIn(env, {})
   const t = env.__test
   // agent1：创建并跑 2 轮（不触发）
   const agent1 = makeAgent(env)

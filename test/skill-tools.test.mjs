@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CURATOR_AUTHOR, SKILL_ID, TOOL_NAMES, TOOL_OUTPUT_SCHEMA, SUPPORT_DIRS,
   parseSkillMd, renderFrontmatter, isCuratorManaged, assertInside, hashOf, assertFresh,
   skillsRoot, backupRoot, backupFile, backupDirTree, normalizeSkillMd, writeGuard, shapeWarnings,
-  BODY_SOFT_LINES, BODY_HARD_LINES, BACKUP_KEEP, listSkills, createSkillToolDefinitions
+  BODY_SOFT_LINES, BODY_HARD_LINES, BACKUP_KEEP, listSkills, createSkillToolDefinitions,
+  skillFilePath, runGit, gitRootOf, GIT_ACTIONS
 } from '../src/skill-tools.js'
 
 test('SKILL_ID validation', () => {
@@ -90,7 +91,7 @@ test('backupFile prunes to the newest BACKUP_KEEP copies (no unbounded growth)',
     const target = await backupFile(src, { backupDir: backups, label: `v${String(i).padStart(2, '0')}` })
     seen.push(target)
   }
-  const { readdirSync, mkdirSync } = await import('node:fs')
+  // readdirSync / mkdirSync 已在文件顶部引入
   // 目录型备份（delete 用）同样计入配额——否则删多了照样无限增长
   for (let i = 0; i < 3; i++) {
     const tree = join(dir, `tree${i}`)
@@ -103,6 +104,139 @@ test('backupFile prunes to the newest BACKUP_KEEP copies (no unbounded growth)',
   assert.ok(kept.some((n) => n.endsWith('.d')), 'directory backups survive the prune')
   // 最旧的被删：第一份备份文件不应还在
   assert.equal(kept.includes(seen[0].split(/[\\/]/).pop()), false, 'oldest backup pruned')
+})
+
+test('skillFilePath: resolves inside the skill dir and refuses escapes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sc-path-'))
+  assert.equal(skillFilePath(root, 'demo'), join(root, 'demo', 'SKILL.md'), 'default is SKILL.md')
+  assert.equal(skillFilePath(root, 'demo', 'references/x.md'), join(root, 'demo', 'references', 'x.md'))
+  assert.equal(skillFilePath(root, 'demo', ''), join(root, 'demo', 'SKILL.md'), 'empty falls back to SKILL.md')
+  for (const bad of ['../evil.md', 'references/../../evil.md', '..']) {
+    assert.throws(() => skillFilePath(root, 'demo', bad), /escape/, `refused ${bad}`)
+  }
+  assert.throws(() => skillFilePath(root, 'Bad Name'), /invalid skill name/)
+})
+
+test('readSkill reads support files (the 2026-09-28 fix) + tree lists every file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sc-tree-'))
+  const backups = mkdtempSync(join(tmpdir(), 'sc-tree-bk-'))
+  const defs = createSkillToolDefinitions(() => ({ skillsRoot: dir, backupRoot: backups }))
+  const byName = Object.fromEntries(defs.map((d) => [d.name, d]))
+  const sig = { signal: new AbortController().signal }
+
+  await byName['skill-library-create'].execute({ name: 'tree-demo', description: 'd', content: '# T' }, sig)
+  const mdHash = (await byName['skill-library-read'].execute({ name: 'tree-demo' }, sig)).data.sha256
+  await byName['skill-library-write-file'].execute(
+    { name: 'tree-demo', filePath: 'references/deep.md', content: '# 深水区\n小节', expectedSha256: mdHash }, sig)
+
+  // 修复前：readSkill 硬编码 SKILL.md，支持文件读不回来
+  const support = await byName['skill-library-read'].execute({ name: 'tree-demo', filePath: 'references/deep.md' }, sig)
+  assert.equal(support.ok, true, 'support file readable now')
+  assert.ok(support.data.content.includes('深水区'), 'support content returned')
+  assert.match(support.data.sha256, /^[0-9a-f]{64}$/, 'support file carries its own sha256')
+
+  const tree = await byName['skill-library-tree'].execute({ name: 'tree-demo' }, sig)
+  assert.deepEqual(tree.data.files.map((f) => f.file), ['SKILL.md', 'references/deep.md'])
+  assert.ok(tree.data.files.every((f) => f.lines > 0 && f.bytes > 0))
+
+  const escape = await byName['skill-library-read'].execute({ name: 'tree-demo', filePath: '../../etc/passwd' }, sig)
+  assert.equal(escape.ok, false, 'escape refused')
+})
+
+test('write-file on an existing support file backs up the previous content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sc-ow-'))
+  const backups = mkdtempSync(join(tmpdir(), 'sc-ow-bk-'))
+  const defs = createSkillToolDefinitions(() => ({ skillsRoot: dir, backupRoot: backups }))
+  const byName = Object.fromEntries(defs.map((d) => [d.name, d]))
+  const sig = { signal: new AbortController().signal }
+  const readHash = async (name, filePath) => (await byName['skill-library-read'].execute({ name, ...(filePath ? { filePath } : {}) }, sig)).data.sha256
+
+  await byName['skill-library-create'].execute({ name: 'ow', description: 'd', content: '# O' }, sig)
+  await byName['skill-library-write-file'].execute(
+    { name: 'ow', filePath: 'references/a.md', content: 'V1', expectedSha256: await readHash('ow') }, sig)
+  const before = readdirSync(backups).length
+  const rewrite = await byName['skill-library-write-file'].execute(
+    { name: 'ow', filePath: 'references/a.md', content: 'V2', expectedSha256: await readHash('ow') }, sig)
+  assert.equal(rewrite.ok, true)
+  assert.equal(rewrite.data.overwritten, true, 'reports overwrite')
+  // 只备份被覆盖的支持文件本身；SKILL.md 没动就不该产生备份（否则备份目录堆噪音）
+  assert.equal(readdirSync(backups).length, before + 1, 'exactly one backup — the overwritten file')
+  const kept = readdirSync(backups).filter((n) => n.includes('references-a.md-support'))
+  assert.equal(kept.length, 1, 'backup labelled with the file path')
+  assert.equal(readFileSync(join(backups, kept[0]), 'utf8'), 'V1', 'backed up the OLD content')
+  // 新增（非覆盖）不产生备份
+  const added = await byName['skill-library-write-file'].execute(
+    { name: 'ow', filePath: 'references/b.md', content: 'fresh', expectedSha256: await readHash('ow') }, sig)
+  assert.equal(added.data.overwritten, false)
+  assert.equal(added.data.backup, null, 'brand-new file needs no backup')
+})
+
+test('delete-file: read-first, backed up, SKILL.md itself refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sc-delf-'))
+  const backups = mkdtempSync(join(tmpdir(), 'sc-delf-bk-'))
+  const defs = createSkillToolDefinitions(() => ({ skillsRoot: dir, backupRoot: backups }))
+  const byName = Object.fromEntries(defs.map((d) => [d.name, d]))
+  const sig = { signal: new AbortController().signal }
+  const readHash = async (name, filePath) => (await byName['skill-library-read'].execute({ name, ...(filePath ? { filePath } : {}) }, sig)).data.sha256
+
+  await byName['skill-library-create'].execute({ name: 'df', description: 'd', content: '# D' }, sig)
+  const mdHash = await readHash('df')
+  await byName['skill-library-write-file'].execute(
+    { name: 'df', filePath: 'references/gone.md', content: 'bye', expectedSha256: mdHash }, sig)
+
+  const main = await byName['skill-library-delete-file'].execute(
+    { name: 'df', filePath: 'SKILL.md', expectedSha256: mdHash }, sig)
+  assert.equal(main.ok, false, 'SKILL.md refused (use patch)')
+
+  await assert.rejects(
+    async () => byName['skill-library-delete-file'].execute({ name: 'df', filePath: 'references/gone.md' }, sig),
+    /expectedSha256/
+  )
+
+  const del = await byName['skill-library-delete-file'].execute(
+    { name: 'df', filePath: 'references/gone.md', expectedSha256: await readHash('df', 'references/gone.md'), reason: 'merged' }, sig)
+  assert.equal(del.ok, true)
+  assert.ok(del.data.backup.includes('deleted-merged'), 'reason recorded in the backup name')
+  const tree = await byName['skill-library-tree'].execute({ name: 'df' }, sig)
+  assert.deepEqual(tree.data.files.map((f) => f.file), ['SKILL.md'], 'file gone, skill intact')
+})
+
+test('git backstop: status/diff/log/commit only; push and friends do not exist', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'sc-git-'))
+  const skills = join(repo, 'skills')
+  mkdirSync(skills, { recursive: true })
+  const init = await runGit(skills, ['init'])
+  if (init.code !== 0) { assert.ok(true, 'git unavailable — skipped'); return }
+  await runGit(skills, ['config', 'user.email', 'curator@test.local'])
+  await runGit(skills, ['config', 'user.name', 'curator-test'])
+
+  const backups = mkdtempSync(join(tmpdir(), 'sc-git-bk-'))
+  const defs = createSkillToolDefinitions(() => ({ skillsRoot: skills, backupRoot: backups }))
+  const byName = Object.fromEntries(defs.map((d) => [d.name, d]))
+  const sig = { signal: new AbortController().signal }
+
+  assert.deepEqual(GIT_ACTIONS, ['status', 'diff', 'log', 'commit'], 'read + commit only — no push/reset')
+  assert.equal(await gitRootOf(skills) !== null, true, 'work tree detected')
+
+  await byName['skill-library-create'].execute({ name: 'gitted', description: 'd', content: '# G' }, sig)
+  const st = await byName['skill-library-git'].execute({ action: 'status' }, sig)
+  assert.equal(st.ok, true)
+  assert.ok(st.data.changes.some((l) => l.includes('gitted')), 'new skill shows in status')
+
+  const first = await byName['skill-library-git'].execute({ action: 'commit', message: 'test: first' }, sig)
+  assert.equal(first.data.committed, true, 'first commit lands')
+  assert.match(first.data.sha, /^[0-9a-f]+$/, 'returns the new sha')
+
+  const nothing = await byName['skill-library-git'].execute({ action: 'commit' }, sig)
+  assert.equal(nothing.data.committed, false, 'nothing to commit → no empty commit')
+
+  const log = await byName['skill-library-git'].execute({ action: 'log' }, sig)
+  assert.ok(log.data.entries.length >= 1, 'commit visible in log')
+
+  for (const action of ['push', 'reset', 'checkout', 'clean', 'remote']) {
+    const bad = await byName['skill-library-git'].execute({ action }, sig)
+    assert.equal(bad.ok, false, `${action} refused`)
+  }
 })
 
 test('backupRoot follows DSH_HOME; SUPPORT_DIRS is the write allow-list', () => {
@@ -302,7 +436,10 @@ test('listSkills aggregates bundle dirs only', async () => {
 })
 
 test('whitelist and output schema shape', () => {
-  assert.equal(TOOL_NAMES.length, 7)
+  assert.equal(TOOL_NAMES.length, 10)
+  for (const t of ['skill-library-delete', 'skill-library-delete-file', 'skill-library-tree', 'skill-library-git']) {
+    assert.ok(TOOL_NAMES.includes(t), `whitelist includes ${t}`)
+  }
   assert.ok(TOOL_NAMES.includes('skill-library-delete'), 'delete is part of the reviewer whitelist')
   assert.ok(TOOL_OUTPUT_SCHEMA.properties.ok.required === true)
   assert.equal(TOOL_OUTPUT_SCHEMA.properties.error.type, 'string')

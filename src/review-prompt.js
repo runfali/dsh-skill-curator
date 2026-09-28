@@ -46,7 +46,9 @@ const PREFERENCE_ORDER = `
 ## 更新优先级（从上往下选最早合适的一档；信号触发时必须至少做一档）
   0. **先做减法**：通读候选 skill 后，若发现重复小节、过期内容、可以合并的同族条目——
      删掉、合并、精简。删一行和加一行同样是成果，往往更有价值。合并时：
-     把要保留的内容并进留下的那个 skill，再用 skill-library-delete 删掉冗余的那个。
+     把要保留的内容并进留下的那个 skill，再用 skill-library-delete 删掉冗余的那个；
+     正文里的细节搬进 references/ 后，用 skill-library-delete-file 清掉过时的支持文件
+     （别让技能目录里堆着没人引用的旧文件）。
   1. 更新本会话加载或读过的 skill（它正在被使用，最适合扩展）——先 skill-library-read 通读全文。
   2. 更新已有 umbrella：能改写现有小节就不新增小节；确实要加就加在最相关的位置。
   3. 在已有 umbrella 下加支持文件（skill-library-write-file）：
@@ -60,6 +62,9 @@ const PREFERENCE_ORDER = `
 
 const WRITE_RULES = `
 ## 写入规则（机制兜底，别试绕过）
+  • 支持文件也读得回来：skill-library-read 传 filePath 参数可读 references/ scripts/ templates/ 任意文件，
+    拿到它自己的 sha256 再改；skill-library-tree 列出该技能下所有文件——**动手前后都该看一眼**，
+    确认自己写了什么、有没有把上次的遗留文件漏在外面。
   • 先读后改：任何 patch / write-file / delete 之前，必须先 skill-library-read 拿到 sha256，
     并在调用时把它作为 expectedSha256 回传。没读过就写会被直接拒绝；读完后文件被改过也会被拒绝
     （那就重新读一遍再写）。
@@ -67,7 +72,10 @@ const WRITE_RULES = `
     这条保险是用来让你**敢改**的，不是用来事后补救的，改之前仍然要读懂原文。
   • 保护名单：settings.excludedSkills 里的 skill 会被拒绝，别去改。
   • 删东西要负责：删除前确认内容真的被别处覆盖或确实无用；合并删除时把理由写进 reason。
-  • 技能库之外的 bundled/hub skill 你看不到也改不了。`
+  • 技能库之外的 bundled/hub skill 你看不到也改不了。
+  • 收尾自动提交：评审结束时插件会把技能库改动**自动 commit**（message = 你的改动摘要），
+    所以你不需要（也不能）自己 commit；但可随时用 skill-library-git 的 status / diff / log 三个动作
+    确认这次改了什么、和上次的差异在哪——**写完先自查，别等下一轮评审来发现你没写对**。`
 
 const NEGATIVE_LIST = `
 ## 不要写入（这些会变成日后咬你的持久自我约束）
@@ -100,7 +108,7 @@ export const REVIEW_INSTRUCTIONS = [
   NEGATIVE_LIST,
   LANG_CLAUSE,
   '## 执行约束',
-  '你的全部工具能力只有 skill-library-* 七件：skill-library-list、skill-library-read、skill-library-create、skill-library-patch、skill-library-write-file、skill-library-delete、skill-library-adopt。',
+  '你的全部工具能力只有 skill-library-* 这十件：skill-library-list（全库概览）、skill-library-read（读任意文件，含 references/，返回 sha256）、skill-library-tree（看某技能里所有文件）、skill-library-create、skill-library-patch、skill-library-write-file、skill-library-delete-file（删支持文件）、skill-library-delete（删整个技能）、skill-library-adopt、skill-library-git（status/diff/log，自查你改了什么）。',
   '其他工具对你不可见、也不会执行——不要尝试。',
   '评价「更新已有 umbrella 还是新建」前，先 skill-library-list 看全库（含正文行数，臃肿一眼可见）。',
   CONCLUSION

@@ -30,7 +30,7 @@ import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
 import { runSkillReview } from './reviewer.js'
-import { createSkillToolDefinitions, TOOL_NAMES, CURATOR_AUTHOR } from './skill-tools.js'
+import { createSkillToolDefinitions, TOOL_NAMES, CURATOR_AUTHOR, skillsRoot, gitRootOf, runGit } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
@@ -80,6 +80,40 @@ export function apply(ctx, config = {}) {
   if (config.historyPath && reviewLog.path !== config.historyPath) {
     reviewLog = createReviewLog(config.historyPath)
     ctx.logger.info('skill-curator: historyPath override applied → %s (prev %s)', config.historyPath, reviewLog.path)
+  }
+
+  /**
+   * 评审收尾自动 commit：把技能库的改动落进 git。
+   *
+   * 为什么放在插件侧而不是让子代理自己调：子代理的 git 工具（skill-library-git）只是
+   * 给它自查用的；真正「每次评审都有版本兜底」必须由主线保证，否则子代理漏调就没了。
+   * @returns {Promise<object|null>} { committed, sha?, reason? }；非 git 库或失败返回 null/原因。
+   */
+  async function autoCommit(ctxRef, spec, actions, agentRef) {
+    try {
+      const root = skillsRoot(spec)
+      const repo = await gitRootOf(root)
+      if (repo === null) return { committed: false, reason: 'skills root is not a git work tree' }
+      const summary = actions.length > 0
+        ? actions.join(' · ').slice(0, 160)
+        : 'review produced no skill change'
+      const session = (agentRef.session && agentRef.session.id) || 'unknown'
+      const message = `skill-curator: ${summary}\n\nsession: ${session}`
+      const res = await runGit(repo, ['add', '-A', '--', '.'])
+      if (res.code !== 0) return { committed: false, reason: `git add failed: ${res.stderr.trim()}` }
+      const status = await runGit(repo, ['status', '--porcelain', '--untracked-files=all'])
+      if (!status.stdout.trim()) return { committed: false, reason: 'nothing to commit' }
+      const commit = await runGit(repo, ['commit', '-m', message])
+      if (commit.code !== 0) return { committed: false, reason: `git commit failed: ${commit.stderr.trim()}` }
+      const head = await runGit(repo, ['rev-parse', '--short', 'HEAD'])
+      const out = { committed: true, sha: head.stdout.trim() }
+      ctxRef.logger.info('skill-curator: auto-committed review changes → %s', out.sha)
+      console.log(`skill-curator: 💾 已提交技能库改动 ${out.sha}`)
+      return out
+    } catch (error) {
+      ctxRef.logger.warn('skill-curator: auto-commit failed: %s', (error && error.message) || error)
+      return { committed: false, reason: String((error && error.message) || error) }
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -153,6 +187,10 @@ export function apply(ctx, config = {}) {
           getSpec: () => settings.spec()
         })
         const actions = out.actions || []
+        // 收尾自动 commit（2026-09-28 发哥拍板）：评审写进技能库的改动立刻进 git，
+        // 否则「子代理写了什么」既无历史也无 diff 兜底。失败只告警，绝不影响评审结论。
+        let versionBackstop = null
+        if (out.ok) versionBackstop = await autoCommit(ctx, settings.spec(), actions, agent)
         reviewLog.record({
           at: new Date().toISOString(),
           sessionId: agent.session && agent.session.id,
@@ -161,7 +199,8 @@ export function apply(ctx, config = {}) {
           actions,
           summary: out.summary,
           diagnostic: out.diagnostic || undefined,
-          fallback: out.fallback
+          fallback: out.fallback,
+          commit: versionBackstop || undefined
         })
         const notify = String(s.notifyMode || 'on')
         if (notify !== 'off') {

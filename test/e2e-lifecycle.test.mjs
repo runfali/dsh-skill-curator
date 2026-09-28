@@ -55,7 +55,7 @@ function setup() {
 
 test('apply wires the full surface (tools / command / route / settings page policy)', () => {
   const { seen } = setup()
-  assert.equal(seen.tools.length, 7, 'seven skill-library tools')
+  assert.equal(seen.tools.length, 10, 'ten skill-library tools')
   assert.equal(seen.commands[0].name, 'skill-refine', '/skill-refine registered')
   assert.equal(seen.routes[0].path, '/api/skill-curator/status', 'status route registered')
   assert.equal(seen.presentations.length, 1, 'settings.configure called once')
@@ -104,11 +104,39 @@ test('lifecycle: hand-written skill → read → patch → references → merge-
   assert.ok(readFileSync(join(del.data.backup, 'references', 'errors.md'), 'utf8').includes('ECONNRESET'),
     'the references/ file went into the backup directory')
 
-  // 5. 收尾状态：只剩 canonical，备份三份（patch / support / delete）
+  // 5. 收尾状态：只剩 canonical。
+  // 备份两份 = patch（改 SKILL.md）+ delete（整目录）；write-file 是新建文件，
+  // 没有旧内容可备——不备份 SKILL.md 免得堆噪音（2026-09-28 起的行为）。
   const listed = await call('skill-library-list', {})
   assert.deepEqual(listed.data.skills.map((s) => s.name), ['runbook'])
-  assert.equal(readdirSync(backupRoot).length, 3, 'patch + support + delete each backed up')
+  assert.equal(readdirSync(backupRoot).length, 2, 'patch + delete backed up; a brand-new file needs none')
   assert.ok(readFileSync(join(skillsRoot, 'runbook', 'SKILL.md'), 'utf8').includes('references/errors.md'))
+})
+
+test('review tools cover the full lifecycle: tree / read support / delete-file / git', async () => {
+  const { skillsRoot, call, readHash } = setup()
+  assert.equal((await call('skill-library-create', { name: 'lifecycle', description: 'd', content: '# L' })).ok, true)
+  await call('skill-library-write-file', {
+    name: 'lifecycle', filePath: 'references/old.md', content: '待清理', expectedSha256: await readHash('lifecycle')
+  })
+
+  // tree：看得见自己写了什么（含支持文件）
+  const tree = await call('skill-library-tree', { name: 'lifecycle' })
+  assert.deepEqual(tree.data.files.map((f) => f.file), ['SKILL.md', 'references/old.md'])
+
+  // read 支持文件：拿到它自己的 sha256（以前读不回来）
+  const support = await call('skill-library-read', { name: 'lifecycle', filePath: 'references/old.md' })
+  assert.equal(support.ok, true)
+  assert.ok(support.data.content.includes('待清理'))
+
+  // delete-file：合并后清掉过时支持文件
+  const gone = await call('skill-library-delete-file', {
+    name: 'lifecycle', filePath: 'references/old.md', expectedSha256: support.data.sha256, reason: 'merged'
+  })
+  assert.equal(gone.ok, true)
+  assert.deepEqual((await call('skill-library-tree', { name: 'lifecycle' })).data.files.map((f) => f.file), ['SKILL.md'])
+
+  void skillsRoot
 })
 
 test('protection list blocks writes end-to-end (live config)', async () => {

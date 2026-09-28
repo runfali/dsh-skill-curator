@@ -60,6 +60,36 @@
 
 ---
 
+# 第四轮：技能库权限补全 + 评审收尾自动提交（2026-09-28 晚）
+
+> 起因：评审子代理的交接留言指出两个缺口——「新文件在库 git 里是未跟踪，需主代理 commit 才算有兜底」与「skill-library-read 读不了支持文件正文」。发哥拍板：补全读写权限并给受控 git，评审收尾自动 commit。
+
+## 修复的缺陷（都可复现）
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `readSkill` 硬编码 `SKILL.md` | 写了 `references/x.md` 读不回来；先读后改护不住支持文件 | 加 `filePath` 参数；路径经 `skillFilePath` 越界校验 |
+| 2 | 支持文件无任何可删除途径 | 改错了擦不掉，技能目录越堆越乱 | 新增 `skill-library-delete-file`（先读后删 + 备份） |
+| 3 | 覆盖已有支持文件不备份 | 旧内容永久丢失 | 覆盖时先 `backupFile` 其旧内容（新增文件不产生备份） |
+| 4 | 子代理无 git 视角 | 「自己写了什么」无从确认，改动无版本兜底 | 新增 `skill-library-git`（仅 status/diff/log，**无 push/reset**，不经 shell） |
+| 5 | 改动无历史 | 误删误改不可回滚 | **评审收尾主线自动 commit**（message = 改动摘要 + session id） |
+| 6 | `listSkillFiles` 排序不稳 | `localeCompare` 与语言环境相关，把 `references/` 排到 `SKILL.md` 前 | SKILL.md 固定首位，其余按码位序 |
+| 7 | 测试污染真实技能库 | `apply.test` 未给 `skillsRoot` → autoCommit 落到真实 `~/.dsh/skills` 并产生垃圾提交（实测踩中 2 条） | 新增 `applyIn()` 统一注入临时技能根；测试断言非 git 根只记录原因 |
+
+## 有意不做（红线）
+
+- **不给子代理 shell**：它的输入含会话内容，拿到 shell = 把整机交出去。git 走 `execFile` + 动作白名单。
+- **不提供 push**：技能库通常无 remote；有也需用户明确授权。测试断言仓库无 remote。
+- **不提供 reset/checkout/clean**：破坏性动作只能由人执行。
+
+## 验证
+
+- `npm test`：单测 83 + smoke 11 组 + client-smoke 8 组，EXIT=0。
+- 新增 `test/auto-commit.test.mjs`：**真实 git + 真插件入口**，断言提交落地、工作树干净、提交内含技能文件、仓库无 remote（不可能 push）。
+- 技能库实机：`~/.dsh/skills` 已提交（原有 6 项改动 + 评审子代理新写的 reference 与版本对账脚本）。
+
+---
+
 # 第三轮：适配 dsh 0.1.7-rc.2（2026-09-28）
 
 > 审计对象：v0.1.7-rc.2（适配轮）· 宿主：`@deepseek-ai/dsh 0.1.7-rc.2`（Node v24）· 参考实现：`D:\DSH\dsh-prompt-injector`

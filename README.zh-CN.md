@@ -73,23 +73,27 @@ dsh plugin --profile web add ./
 
 ## 技能库工具（白名单）
 
-评审子代理只能调这七个工具（主会话也可直接用）：
+评审子代理只能调这十个工具（主会话也可直接用）：
 
 | 工具 | 用途 |
 |---|---|
 | `skill-library-list` | 列技能（名称/描述/正文行数/是否受保护） |
-| `skill-library-read` | 读单个 SKILL.md 全文 + **sha256** |
+| `skill-library-read` | 读**任意文件**（SKILL.md，或用 `filePath` 指支持文件）全文 + **该文件自己的 sha256** |
+| `skill-library-tree` | 列出某技能下全部文件（行数/大小）——「自己写了什么」一眼可见 |
 | `skill-library-create` | 新建类级 umbrella 技能（中文正文 + 双语描述） |
 | `skill-library-patch` | 定点 `oldString→newString` 或全文替换（保留 frontmatter） |
-| `skill-library-write-file` | 写 `references/` `templates/` `scripts/` 支持文件 |
+| `skill-library-write-file` | 写支持文件；**覆盖已有文件时先备份其旧内容** |
+| `skill-library-delete-file` | 删单个支持文件（先读后删，原件进备份） |
 | `skill-library-delete` | 删除冗余/已合并的 skill（先读后删，整目录进备份） |
 | `skill-library-adopt` | 给外部来源的 skill 盖 `author` 章（标记来源，非写入前提） |
+| `skill-library-git` | 技能库版本自查：**status / diff / log**（无 push、无 reset，不经 shell） |
 
-### 三道安全网
+### 四道安全网
 
 1. **先读后改**：`patch` / `write-file` / `delete` 都必须回传 `skill-library-read` 给的 `expectedSha256`；没读就写、或读完之后文件又变了，一律拒绝。这是唯一能防住「凭印象重写别人 skill」的机制。
 2. **写前备份**：任何写入/删除前，原件（删除时是整个技能目录）复制到 `~/.dsh/skill-curator/backups/`，保留最近 30 份，可手工回滚。
 3. **保护名单**：`excludedSkills` 里的 skill 只读。
+4. **git 兜底**：评审结束时**主线自动 commit**（message = 改动摘要 + session id）——每次评审都留下可回滚的版本点。提交失败只告警，绝不影响评审结论；技能根不是 git 工作树则跳过并记录原因。
 
 路径全部越界校验，写盘原子（tmp + rename）。写入后若正文超过 150 行，工具返回值会带一条「下沉 references/」的提醒（不拦截）。
 

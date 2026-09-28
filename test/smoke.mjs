@@ -36,7 +36,7 @@ assert.equal(typeof host.reviewLog.recent, 'function', 'review log')
 
 // 3. 工具定义真实编译（defineTool 会校验 schema 形状）
 const definitions = tools.createSkillToolDefinitions(() => ({}))
-assert.equal(definitions.length, 7, 'seven skill-library tools')
+assert.equal(definitions.length, 10, 'ten skill-library tools')
 for (const def of definitions) {
   assert.match(def.name, /^skill-library-/, `name ${def.name}`)
   assert.equal(typeof def.execute, 'function', `${def.name} execute`)
@@ -212,5 +212,5 @@ const dup = await byName['skill-library-create'].execute(
 )
 assert.equal(dup.ok, false, 'duplicate create refused')
 
-console.log('smoke OK: 11 groups passed（含 0.1.7 设置契约 / 先读后改 sha256 / 备份 / 删除 / 保护名单）')
+console.log('smoke OK: 11 groups passed（含 0.1.7 设置契约 / 先读后改 sha256 / 备份 / 删除 / 保护名单 / git 兜底）')
 process.exit(0)
