@@ -12,7 +12,7 @@
  * 运行：node --test test/entry.test.mjs
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -44,7 +44,7 @@ ok('宿主入口真实 import 成功（apply / name / inject / Config 面齐备�
 // ---------------------------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 assert.equal(typeof pkg.version, 'string', 'package.json 缺 version')
-assert.equal(pkg.version, '0.1.7-rc.2', '版本号必须跟宿主发布号（家族惯例）')
+assert.equal(pkg.version, '0.2.0-rc.1', '版本号必须跟宿主发布号（家族惯例）')
 assert.equal(pkg.type, 'module', '必须是 ESM 包')
 assert.equal(pkg.exports['.'], './src/index.js', 'exports["."] 必须指向宿主入口')
 assert.equal(pkg.exports['./client'], './lib/client.js', 'exports["./client"] 必须指向 client bundle')
@@ -136,28 +136,57 @@ const TABLE = [
   ['0.1.7-rc.2', true],
   ['0.1.3-alpha.1', false],
   ['0.1.4', true],
-  ['0.2.0', false],
+  // 0.2.0 适配轮（2026-09-29）：宿主实测 0.2.0-rc.1，新区间必须放行 0.2.x 全系。
+  // 上一轮这里断言 0.2.0 === false（当时未验证，故意拦住），本轮已验证 → 有意翻转。
+  ['0.2.0-alpha.0', true],
+  ['0.2.0-rc.1', true],
+  ['0.2.0', true],
+  ['0.2.3', true],
+  ['0.1.8', false],
+  ['0.3.0', false],
   ['0.0.1', false]
 ]
 for (const [version, expected] of TABLE) {
   assert.equal(satisfies(version, range), expected, 'engines 区间对 ' + version + ' 的判定应为 ' + expected + '（区间=' + range + '）')
 }
-ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 / 0.1.7-rc.2 覆盖）')
+ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 / 0.1.7-rc.2 / 0.2.0 覆盖，0.1.8 与 0.3.0 排除）')
 
 // 反证：旧单区间不覆盖预发布 —— 这正是必须加析取的原因
 assert.equal(satisfies('0.1.5-rc.1', '>=0.1.2-alpha.3 <0.2.0'), false, '旧单区间本不应覆盖 0.1.5-rc.1，判定器写反了')
 assert.equal(satisfies('0.1.7-rc.2', '>=0.1.2-alpha.3 <0.2.0'), false, '旧单区间本不应覆盖 0.1.7-rc.2，判定器写反了')
 ok('反证：旧单区间不覆盖 0.1.5-rc.1 / 0.1.7-rc.2（故必须加析取，非冗余声明）')
 
+// 反证：0.2.0 适配轮——旧三段区间不覆盖 0.2.0-rc.1，故新段非冗余。
+// 真机证据：未加新段时宿主启动闸打印 `skipping profile bundle "dsh-skill-curator"`，
+// 整个 bundle 不加载。
+const OLD_THREE_CLAUSE = '>=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8'
+assert.equal(satisfies('0.2.0-rc.1', OLD_THREE_CLAUSE), false, '旧三段区间本不应覆盖 0.2.0-rc.1，判定器写反了')
+assert.equal(satisfies('0.2.0-rc.1', range), true, '新区间必须覆盖 0.2.0-rc.1')
+ok('反证：旧三段区间不覆盖 0.2.0-rc.1（故新段非冗余声明）')
+
 // 交叉验证：同一判定表与宿主真实 semver 逐行一致（宿主不可解析则显式跳过，不假绿）
+// 解析路径按实测顺序（本仓 pnpm 布局）：semver 是 @deepseek-ai/dsh 的依赖，落点是
+// `node_modules/.pnpm/semver@<ver>/node_modules/semver`（顶层无裸 semver），
+// 因此除裸名外还扫 .pnpm 目录——版本号不写死，避免升级后静默跳过交叉验证。
 const req = createRequire(import.meta.url)
-let semver = null
-for (const candidate of ['/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/semver', 'semver']) {
-  try { semver = req(candidate); break } catch { /* next */ }
+function loadHostSemver() {
+  for (const candidate of ['semver', '@deepseek-ai/dsh/node_modules/semver']) {
+    try { return req(candidate) } catch { /* next */ }
+  }
+  try {
+    const pnpmDir = join(root, 'node_modules', '.pnpm')
+    for (const entry of readdirSync(pnpmDir)) {
+      if (!entry.startsWith('semver@')) continue
+      try { return req(join(pnpmDir, entry, 'node_modules', 'semver')) } catch { /* next */ }
+    }
+  } catch { /* .pnpm absent */ }
+  return null
 }
+const semver = loadHostSemver()
 if (semver && typeof semver.satisfies === 'function') {
+  // 两种模式都要对：严格模式（pnpm 安装期）与宿主闸模式（includePrerelease，决定能否加载）。
   for (const [version, expected] of TABLE) {
-    assert.equal(semver.satisfies(version, range), expected, '宿主 semver 对 ' + version + ' 的判定与内置判定表不一致')
+    assert.equal(semver.satisfies(version, range), expected, '宿主 semver（严格模式）对 ' + version + ' 的判定与内置判定表不一致')
   }
   ok('内置判定器与宿主真实 semver.satisfies 逐行一致（' + TABLE.length + '/' + TABLE.length + '）')
 } else {
@@ -174,8 +203,12 @@ for (const dep of PEER) {
   assert.equal(typeof spec, 'string', dep + ' 必须在 peerDependencies 里声明')
   assert.ok(satisfies(pkg.version, spec), dep + ' 的 peer 区间必须覆盖当前版本 ' + pkg.version + '（区间=' + spec + '）')
   assert.equal(typeof (pkg.devDependencies || {})[dep], 'string', dep + ' 需要 devDependencies 副本供本地测试解析')
+  // 兼容闸（dsh-app-boot 的 evaluatePluginCompatibility）**只**遍历 peerDependencies 里
+  // @deepseek-ai/dsh* 的条目，**从不读 dsh.engines.dsh**（全树 grep 零消费者）。
+  // 因此 peer 才是决定插件生死的声明；engines 只影响 pnpm 安装期。两者必须逐字一致。
+  assert.equal(spec, pkg.dsh.engines.dsh, dep + ' 的 peer 区间必须与 dsh.engines.dsh 逐字一致（闸只认 peer）')
 }
-ok('4 个 @deepseek-ai/dsh-* 依赖面 = peer（区间覆盖 ' + pkg.version + '）+ dev 副本，runtime dependencies 为空')
+ok('4 个 @deepseek-ai/dsh-* 依赖面 = peer（区间覆盖 ' + pkg.version + '，且与 engines 逐字一致）+ dev 副本，runtime dependencies 为空')
 
 // ---------------------------------------------------------------------------
 // 4. 宿主服务名真实存在（顶层 inject 写错名 = 插件永远 pending，且完全静默）

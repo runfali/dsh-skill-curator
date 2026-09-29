@@ -106,7 +106,7 @@ The review prompt carries a shape contract aimed squarely at "skills only ever g
 // package.json — machine-readable
 "engines": { "node": "^22.19.0 || >=24.0.0" },
 "peerDependencies": {          // the host runtime is the single source of truth; no bundled dsh-* copies
-  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8",
+  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0",
   "@deepseek-ai/dsh-settings": "…same…",
   "@deepseek-ai/dsh-subagent": "…same…",
   "@deepseek-ai/dsh-tools":    "…same…",
@@ -131,6 +131,24 @@ node test/client-smoke.mjs  # client bundle smoke (real component-tree execution
 ```
 
 `docs/EVIDENCE.md` records the isolated-instance install/start/E2E run (disposable `DSH_HOME`, no deployed instance touched); `docs/AUDIT.md` records the audit rounds.
+
+## dsh 0.2.0-rc.1 适配结论
+
+对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.0-rc.1`）做了 asar 解包源码比对 +
+**真机闸实测**。要点：
+
+- **唯一必改项是兼容区间**：原区间在 0.2.0-rc.1 下被启动闸拒绝
+  （`dsh: skipping profile bundle ...`），插件**整个 bundle 不加载**（web 与 desktop 同时失效）。
+  追加 `|| >=0.2.0-alpha.0 <0.3.0` 后放行。
+- **闸只读 `peerDependencies`**：判定函数（`dsh-app-boot` 的
+  `evaluatePluginCompatibility`）只遍历 `peerDependencies` 里 `@deepseek-ai/dsh*` 的条目，
+  **从不读 `dsh.engines.dsh`**（全树 grep 零消费者）。两者必须逐字一致，测试已守护。
+- **两种 semver 模式**：宿主闸用 `includePrerelease: true`，此时「预发布可见性」规则被绕过，
+  于是**上界自身的预发布也被放行**（`<0.1.8` 放行 `0.1.8-rc.1`、`<0.3.0` 放行 `0.3.0-alpha.0`）；
+  严格模式（pnpm 安装期）会拒绝它们。所以上界拦的是**正式版**，不是预发布。
+  若要连预发布一起拒，上界须写成 `<0.3.0-0`。
+- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/DSH-0.2.0-ADAPTATION.md`。
+
 
 ## License
 
