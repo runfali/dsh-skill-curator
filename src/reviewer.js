@@ -17,16 +17,31 @@
  * 隔离设计：
  *   - 评审子代理是独立 session，绝不往父会话写任何事件（无污染）；
  *   - 摘要而非全量会话注入（控制成本）；
- *   - 每次尝试独立超时兜底；settleRun 永不 reject（失败转 status）。
- *   - 0.1.7-rc.2 契约：settleRun 仍从包根导出（dsh-subagent/lib/index.js:3201），
- *     返回 { status:'completed'|'killed'|'failed', output?, detail? }，与 0.1.5 同名同形。
+ *   - 每次尝试独立超时兜底；结算永不 reject（失败转 status）。
+ *
+ * 0.2.1-rc.2 适配（2026-10-18 实测，两处破坏性变更）：
+ *   1. `settleRun` 已从 `@deepseek-ai/dsh-subagent` 包根移除，且无子路径可达
+ *      → 改为本仓库内联实现（./run-settlement.js）。理由详见该文件头。
+ *   2. `subagents.start()` 整个方法被移除，改为 `startActivation(spec)`
+ *      （spec 多一层 `request`，delivery 决定结算通知去向）。
+ *   3. `request.toolFilter` 在 0.2.1 的创建路径上**零读取点**，白名单改由
+ *      Agent Preset 承载（见 REVIEW_AGENT_PRESET 与 src/preset-guard.js）。
  */
-import { settleRun } from '@deepseek-ai/dsh-subagent'
+import { settleRun } from './run-settlement.js'
 import { TOOL_NAMES } from './skill-tools.js'
 import { createCustomAdapter } from './custom-adapter.js'
 
 /** 自定义端点默认 provider 路由名（设置 reviewProvider 非空时用之）。 */
 export const CUSTOM_REVIEW_ROUTE = 'skill-curator-review'
+
+/**
+ * 评审子代理专用的 Agent Preset 名（由本插件的 cordis.patch.yml 声明）。
+ *
+ * 为什么需要：0.2.1 起「按子代理过滤工具」只能经 preset 表达——`request.toolFilter`
+ * 被宿主静默丢弃，`dsh-tool-subagent` 的 `config.toolFilter` 直接抛错并指向 preset。
+ * preset 内挂 src/preset-guard.js，在**子代理自己的 scope** 上调 `tools.restrict()`。
+ */
+export const REVIEW_AGENT_PRESET = 'skill-curator-review'
 
 /**
  * 自定义端点 adapter 的进程内注册记录：route -> { adapter, handle }。
@@ -150,13 +165,49 @@ export function isEndpointModelFailure(errorOrDetail) {
 }
 
 /**
- * 单次评审尝试：起子代理并 settle（永不 reject；start 抛错向上传）。
+ * 单次评审尝试：起子代理并结算（永不 reject；启动抛错向上传）。
  * 每次尝试独立 AbortController + 超时预算。
+ *
+ * 两代宿主的分叉（2026-10-18 适配轮）：
+ *   - **0.2.1+**：`startActivation(spec)`，spec 形状 `{provider,label,request,signal,delivery}`。
+ *     它的 `signal` **只覆盖 admission**（起子会话期间的取消），不覆盖子代理执行期——
+ *     所以超时必须**显式 dispose**，否则子代理会一直跑到自己结束（评审卡死 15 分钟）。
+ *   - **≤0.2.0**：`start(name, request)`，signal 随 request 传入，run 自带 result/dispose。
+ *
+ * 探测方式用「方法在不在」而非版本号：宿主从不导出自己的版本给插件，
+ * 且两个方法在各自代际里互斥存在（0.2.0 无 startActivation，0.2.1 无 start）。
+ *
+ * @param {object} subagents - subagents 服务。
+ * @param {string} provider - provider 名（通常 'spawn'）。
+ * @param {object} request - 子代理请求（prompt/parent/agentPreset|toolFilter/agentOptions?）。
+ * @param {string} label - 子代理显示标签。
+ * @param {number} timeoutMs - 单次尝试超时。
+ * @returns {Promise<{status: string, result?: string, detail?: string}>}
  */
-async function runOnce(subagents, provider, request, timeoutMs) {
+async function runOnce(subagents, provider, request, label, timeoutMs) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('skill review timeout')), timeoutMs)
   try {
+    if (typeof subagents.startActivation === 'function') {
+      const activation = await subagents.startActivation({
+        provider,
+        label,
+        request,
+        signal: controller.signal,
+        // delivery='caller'：结算通知不回灌父会话（本插件的隔离红线），
+        // 且不要求 sessionPersistence（评审子代理无需可续期）。
+        delivery: 'caller'
+      })
+      // 超时拆子会话：宿主的 dispose 是 memoized 的 close 事务（重复调用幂等），
+      // 它带 stop=true → 取消子代理 → 其 result 以 aborted 收敛 → settleRun 判 killed。
+      const stopOnAbort = () => { Promise.resolve(activation.dispose()).catch(() => {}) }
+      controller.signal.addEventListener('abort', stopOnAbort, { once: true })
+      try {
+        return await settleRun(activation)
+      } finally {
+        controller.signal.removeEventListener('abort', stopOnAbort)
+      }
+    }
     return await settleRun(await subagents.start(provider, { ...request, signal: controller.signal }))
   } finally {
     clearTimeout(timer)
@@ -183,12 +234,17 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
   const provider = resolveProvider(subagents)
   const timeoutMs = Number((spec && spec.reviewTimeoutMs) || 900000)
 
+  // 白名单载体随宿主代际切换（见文件头适配说明）：
+  //   - 0.2.1+：`request.toolFilter` 被静默丢弃 → 只能经 agentPreset 表达，
+  //     白名单在 preset 内由 src/preset-guard.js 调 tools.restrict() 落地。
+  //   - ≤0.2.0：宿主仍读 `request.toolFilter`（startContinuable 塞进 composition）。
+  const modern = typeof subagents.startActivation === 'function'
   const baseRequest = {
-    label,
     prompt: [{ type: 'text', text: prompt }],
     parent: agent,
-    // 白名单：子代理只能看到/执行 skill 工具（hermes 运行时白名单等价物）
-    toolFilter: { allow: TOOL_NAMES }
+    ...(modern
+      ? { agentPreset: REVIEW_AGENT_PRESET }
+      : { toolFilter: { allow: TOOL_NAMES } })
   }
 
   // 模型覆盖判定：
@@ -213,7 +269,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
   let outcome
   let fallbackReason = null
   try {
-    outcome = await runOnce(subagents, provider, overrideRequest, timeoutMs)
+    outcome = await runOnce(subagents, provider, overrideRequest, label, timeoutMs)
   } catch (error) {
     // start 抛错：provider 拒绝 / 模型解析失败等
     const message = String((error && error.message) || error)
@@ -234,7 +290,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
 
   // 回退：去掉模型覆盖，以父会话模型重跑一次（只回退一次）
   if (fallbackReason !== null) {
-    outcome = await runOnce(subagents, provider, baseRequest, timeoutMs)
+    outcome = await runOnce(subagents, provider, baseRequest, label, timeoutMs)
   }
 
   // 有限重试：评审跟随/回退到主模型后，主模型的连接类瞬断不再直接终止本次评审
@@ -251,7 +307,7 @@ export async function runSkillReview(ctx, agent, { prompt, spec, getSpec = () =>
     ctx.logger?.info?.(`skill-curator: review retry ${attempt}/${retryMax} after ${outcome.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`)
     // 重试仍带模型覆盖：端点恢复后就能继续用专用评审模型/自定义端点，
     // 不必等下一次评审；回退只发生在「确实跑不动」时（去掉覆盖再跑）。
-    outcome = await runOnce(subagents, provider, fallbackReason !== null ? baseRequest : overrideRequest, timeoutMs)
+    outcome = await runOnce(subagents, provider, fallbackReason !== null ? baseRequest : overrideRequest, label, timeoutMs)
   }
 
   const ok = outcome && outcome.status === 'completed'

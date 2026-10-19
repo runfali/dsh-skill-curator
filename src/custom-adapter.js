@@ -109,6 +109,18 @@ export function createCustomAdapter(getSpec, route) {
     imageRequestPricing() {
       return undefined
     },
+    // 0.2.1-rc.2 新增（dsh-llm lib/index.js:1706，抽象类签名见 typert.host.js）。
+    // 基类默认 = 原样透传归一化图片的尺寸与字节预算，不缩放。
+    // 本评审路由走 OpenAI 兼容 /chat/completions 且只发文本块，永不含图片；
+    // 但声明面必须齐备——缺它则宿主 facade 的 `adapter.imageRequestTarget(...)`
+    // 表达式 TypeError（同 imageRequestPricing 的失败形态）。
+    imageRequestTarget(_provider, _model, image) {
+      return {
+        width: image.width,
+        height: image.height,
+        maxBytes: image.bytes
+      }
+    },
     async listModels(provider) {
       const c = endpoints()
       return c.model ? [modelInfo(provider, c.model)] : []

@@ -28,6 +28,7 @@ const mod = await import('../src/index.js')
 const { apply, name } = mod
 const reviewLog = mod.reviewLog
 import { Config } from '../src/settings.js'
+import { TOOLS_READY_SERVICE } from '../src/skill-tools.js'
 
 // 0.1.7 起设置值不再经 settings 服务读回：apply 收到的 config 里，可热编辑字段
 // 是 {get()} 活引用（宿主 _commitVolatile 原地写入），普通字段是裸值。
@@ -52,6 +53,7 @@ function makeCtx(config = {}) {
   const routes = []
   const agentCtxs = []
   const presentations = []
+  const provided = []
   // webServer 就绪开关：默认关（真机 apply 期的常见形态），需要时按测试打开。
   let webServerReady = false
   const webServerReadyGetter = () => webServerReady
@@ -127,6 +129,10 @@ function makeCtx(config = {}) {
       return undefined
     },
     tools: { register(def) { tools.push(def) } },
+    // ctx.provide：cordis reflect mixin 暴露的官方服务发布 API（cordis/lib/index.js:736-742）。
+    // preset 内的 preset-guard 靠它 inject 就绪标记，所以桩必须记下来 ——
+    // 不记就等于「发布了但没人看得见」，顺序错误会静默通过。
+    provide(name, value) { provided.push({ name, value }); return () => {} },
     // agent 级 scoped ctx 工厂：真实环境 agent.ctx.on 只收本 agent 事件
     createAgentCtx(agent) {
       const actxListeners = new Map()
@@ -142,7 +148,7 @@ function makeCtx(config = {}) {
     },
     __setWebServerReady(v) { webServerReady = v },
     __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, skillsRoot, backupRoot }
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, skillsRoot, backupRoot }
   }
   return ctx
 }
@@ -195,6 +201,42 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
+})
+
+test('apply 必须在注册完 10 个工具**之后**才发布就绪标记（顺序反了 = preset 守卫失效）', async () => {
+  // 真机事故（2026-10-18）：preset 内的 preset-guard 用 tools.restrict({allow}) 收敛
+  // 子代理工具面，而 restrict 用 view(scope).restrictableNames 校验名字 —— 它只收
+  // **继承面**（dsh-tools/lib/index.js:3058-3070）。profile 各行由 EntryGroup.update
+  // 的 Promise.all 并发创建，preset 行只 inject tools、本插件还要等 settings →
+  // preset 先跑完，那一刻工具还没注册 → restrict 抛 "names unknown global tools"
+  // → registry 写死 record.broken（"A mount failure is final"）→ preset 永久 broken。
+  // 判据：记录 register / provide 的**调用顺序**，标记必须在最后一个工具之后。
+  const env = makeCtx({})
+  const order = []
+  env.tools.register = (d) => order.push(`register:${d.name}`)
+  const origProvide = env.provide
+  env.provide = (name, value) => { order.push(`provide:${name}`); return origProvide(name, value) }
+
+  applyIn(env, {})
+
+  const provideAt = order.findIndex((s) => s.startsWith('provide:'))
+  assert.ok(provideAt >= 0, '必须发布就绪标记，否则 preset 内的 guard 永远 INACTIVE')
+  assert.equal(
+    order[provideAt],
+    `provide:${TOOLS_READY_SERVICE}`,
+    '就绪标记名必须与 preset-guard 的 inject 键一致'
+  )
+  assert.equal(
+    order.filter((s) => s.startsWith('register:')).length,
+    10,
+    '10 个工具都要在标记之前注册'
+  )
+  assert.equal(
+    provideAt,
+    order.length - 1,
+    `就绪标记必须是最后一步（实际顺序：${order.join(' → ')}）；` +
+      '先发布会让 guard 在工具未就绪时调 restrict 而抛错'
+  )
 })
 
 test('agents 未就绪不得静默丢补注册；就绪后必须挂上现存 agent（第七路盲区回归）', async () => {

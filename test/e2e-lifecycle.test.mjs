@@ -18,7 +18,7 @@ const mod = await import('../src/index.js')
 
 /** 最小 cordis 宿主上下文（只需 apply 用到的面）。 */
 function makeHost() {
-  const seen = { tools: [], listeners: new Map(), routes: [], commands: [], presentations: [], effects: [], webServerReady: true }
+  const seen = { tools: [], listeners: new Map(), routes: [], commands: [], presentations: [], effects: [], provided: [], webServerReady: true }
   const ctx = {
     fiber: { state: 2 },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
@@ -40,6 +40,7 @@ function makeHost() {
     },
     settings: { configure(presentation) { seen.presentations.push(presentation); return () => {} } },
     tools: { register(definition) { seen.tools.push(definition) } },
+    provide(name, value) { seen.provided.push({ name, value }); return () => {} },
     get(key) {
       if (key === 'commands') return { register(d) { seen.commands.push(d); return () => {} } }
       if (key === 'webServer') return { register(r) { seen.routes.push(r); return () => {} } }

@@ -3,6 +3,158 @@
 > 审计时间：2026-09-01 · 审计对象：v0.2.0（commit 52b62c8，dsh 0.1.2-alpha.3 适配收尾后）
 > 方法：代码级逐文件通读（host 9 模块 + client bundle + 8 测试文件）+ 契约级源码对照（dsh-settings / dsh-tools / dsh-subagent / dsh-llm / dsh-commands / dsh-agent / dsh-agent-loop / webServer）+ 测试执行（60/60 + smoke 11 groups 全绿）
 
+---
+
+# 第八轮：修复 preset 挂载失败（2026-10-18 真机事故）
+
+> 症状：设置 → Agent 预设 里出现 `技能评审（内部，勿选）`，标着「加载失败」。
+> 报错原文（用户提供 + 状态路由回放，逐字一致）：
+> `preset-guard (dsh-skill-curator/preset-guard): tools.restrict() names unknown global tools "skill-library-list", …; known global tools: create_worktree, …, memory_append, …, terminal_*, web_fetch_*, working_directory`
+
+## 一、根因：并发装载下的注册竞态（不是层级错误）
+
+`tools.restrict()` 用 `view(scope).restrictableNames` 校验名字，而该集合**只收继承面**
+（global 层 + 祖先链，`dsh-tools/lib/index.js:3058-3070`，`if (layer === own) continue`）。
+
+profile 各行由 `EntryGroup.update` 的 `Promise.all` **并发**创建
+（`cordis-plugin-loader/lib/index.js:87-92`）：preset 行只 inject `tools`，
+而 skill-curator 还要等 `settings` → **preset 先跑完**，那一刻 `skill-library-*` 尚未注册。
+
+**排除「层级错误」的三条证据**：
+1. 抛的是**名字未知**那条（`:3004`），不是 scope 那条（`:2993`）→ guard 确实在 preset scope 里跑。
+2. known 列表里有 `memory_append` / `soul_read` / `terminal_*` —— 都来自**兄弟 bundle**，与 skill-curator 同为 profile 顶层行、同样注册到 global 层。**同层级**。
+3. 独缺 10 个 `skill-library-*` → 只是「还没注册」。
+
+**后果比普通报错重**：`activate()` 把 mount 失败写死进 `record.broken`（源码注释
+"A mount failure is final"），而 Loader 行**照样显示 `fiberPhase: 'active'`**，
+`diagnostic()` 在 `generation === undefined` 时直接返回缓存文本 → **永久 broken + 行状态看不出来**。
+
+## 二、修复：就绪握手（`ctx.provide` → `inject`）
+
+| 侧 | 改动 |
+|---|---|
+| `src/index.js` | 注册完 10 个工具后 `ctx.provide(TOOLS_READY_SERVICE, {names})` |
+| `src/skill-tools.js` | 新增 `TOOLS_READY_SERVICE = 'skillCuratorTools'`（单点定义） |
+| `src/preset-guard.js` | `inject = ['tools', TOOLS_READY_SERVICE]`，等工具就位才 restrict |
+
+为什么可行（三条源码依据）：
+- 等待服务的 fiber 进 `INACTIVE`，**不阻塞启动**（`cordis/lib/index.js:1320-1328`）。
+- 服务发布后 `notify()` 重扫 inject 匹配的 fiber 并 `_refresh()`（`:832-851`）。
+- registry 只在 `audit.failed` 时判 broken，**`pending` 是设计允许的中间态**
+  （`dsh-agent-preset-registry/lib/index.js:218-236`："Rows waiting for a Host service stay mounted"）。
+- `ctx.provide` 是官方公开 API（reflect mixin，`cordis/lib/index.js:736-742`；宿主自己 5 处在用）。
+
+**失败即关闭**：guard 的 `catch` 重新抛出（带 `GUARD_REVISION` + `resolvable=` 诊断），
+绝不吞错继续——否则评审子代理会带着父组合的全部工具（含 shell）去读完整会话摘要。
+
+## 三、验证（离线三层，全部可重跑）
+
+| 层 | 脚本 | 结论 |
+|---|---|---|
+| 单元 | `test/preset-guard.test.mjs`（14 项） | inject 含标记、失败即抛、标记单一事实源、`reviewPresetStatus` 三态 |
+| **集成（真实 restrict）** | `test/preset-guard-real-restrict.mjs` | 用**真实** `ToolRuntime` + registry 拓扑 → `restrict` **接受**全部 10 个名字 |
+| **反向对照** | `test/preset-guard-negative-control.mjs` | 去掉握手 → 用真实 restrict **逐字复现**真机那条报错 |
+
+**为什么必须有反向对照**：PASS 只证明「加了握手能过」，不证明「握手是过的原因」。
+没有它，PASS 可能来自拓扑或时序巧合。
+
+变异测试 6 个变异体杀 5（详见下节）。全套：**118 单测 + smoke 11 组 + client-smoke 8 组 + 2 个 preset 集成检查**。
+
+## 四、两个方法学教训（本轮真金）
+
+1. **Loader 行 `active` ≠ 组件装载成功。** 我一度用 `include:preset-skill-curator-review`
+   的 `fiberPhase: 'active'` 当作验收通过 —— 那是错的：`activate()` 吞掉 mount 失败、
+   只写 `record.broken`。**独立判据**是 `agentPresets.list()`（每次调用重跑 `diagnostic()`），
+   已接进状态路由的 `reviewPreset` 字段。
+2. **「没重挂」与「重挂但没用」会产生逐字相同的报错。** 因为 `record.broken` 是
+   activate 时写死的缓存。加 `GUARD_REVISION` 到报错文本后，看有没有它就能一刀切开
+   —— 实测证明当时是**没重挂**（`set_plugin` 返回 `restart-required / package-moved`）。
+
+## 五、当前状态与剩余动作
+
+- 代码修复完成，离线三层验证全绿；**新代码已载入真机**（状态路由出现 `toolsReadyService` 字段）。
+- `set_plugin` 重挂 preset 返回 **`restart-required` / `restartReason: "package-moved"`**，
+  所以 preset **仍是旧的 broken 记录**。成因已定位：`ResolutionRouter.replace()`
+  在某个包的 `realDir` 变化时抛 `ResolutionRestartRequired`（`dsh-app-boot/lib/index.js:1540-1563`），
+  由 18:36 那次 `pnpm install`（升级 devDependencies）改了 `.pnpm` 目录哈希触发。
+- **需要重启 dsh 客户端**才能重挂 preset。重启后验收判据：
+  `GET /api/skill-curator/status` → `reviewPreset` 应为 `{"id":"skill-curator-review","ok":true}`。
+- 若重启后仍 broken，报错文本里会出现 `guard-rev-2026-10-18b` —— 那说明是**修复本身**无效，
+  届时改走「子代理不带工具、由插件侧带特权落盘」的方案。
+
+---
+
+# 第七轮：适配 dsh 0.2.1-rc.2（2026-10-18）
+
+> 审计对象：v0.2.1-rc.2 · 宿主：`@deepseek-ai/dsh-desktop-runtime` **0.2.1-rc.2**（`D:\DeepSeek Harness\resources\app.asar`）
+> 方法：**从 asar 解包宿主实装源码**（`16 + headerSize` 才是数据偏移；`8 + headerSize` 读出来是垃圾）→ 逐契约对照 → 三个 P0 全部用 RED 测试复现 → 修复 → 变异测试证明守护非装饰 → 真机验收。
+
+## 一、三个 P0（全部由「本地依赖夹具是旧版」掩盖，`npm test` 永远绿）
+
+| # | 事实 | 证据 | 后果 |
+|---|---|---|---|
+| **P0-1** | `@deepseek-ai/dsh-subagent` 0.2.1 **包根不再导出 `settleRun`** | 根导出清单只剩 `settleRunResult`；实现搬进 `lib/types/run-settlement.js`，但 `exports` 只有 `.` / `./internal` / `./client` / `./typert` / `./remote` / `./src/*`，**无对应子路径**，`src/` 也不随包发布 | 顶层 `import { settleRun }` 在 **ESM 链接期抛 SyntaxError** → `apply()` 从未执行 → **整个插件全死**（工具/设置卡/自动 commit 全无），而宿主只打一行 warning |
+| **P0-2** | **`subagents.start()` 整个方法被移除** | 0.2.0 有 `async start(name, request)`（lib/index.js:3115）；0.2.1 无该方法，改为 `startActivation(spec)`（:3036，spec 多一层 `request`） | 修好 P0-1 后评审**依然跑不起来**：`TypeError: subagents.start is not a function` |
+| **P0-3** | **`request.toolFilter` 在创建路径上被静默丢弃** | 0.2.0 `startContinuable` 读 `request.toolFilter` 并塞进 composition（:1733）；0.2.1 `startLocal` 只写 `composition: { agentPreset }`（:1452），**全树零读取点**。`dsh-tool-subagent` 对 `config.toolFilter` 直接抛错并指向 Agent Preset | 白名单无声失效 → 评审子代理拿到**父组合全部工具（含 shell/fs）**，而它读的是**完整会话摘要** |
+
+**归属**：三个都是 **0.2.1 引入的破坏性变更**，非存量缺陷。前两个是「删 API」，第三个是**语义搬家**（工具过滤从 `request` 层搬到 preset 层）——最隐蔽，因为它不报错。
+
+**为什么本地全绿**：插件 `node_modules` 那份夹具是 0.2.0-rc.1（仍有 `settleRun` / `start` / 读 `toolFilter`）。夹具自洽 = 假绿。判据：**升级 devDependency 后复跑**，否则「绿」不构成适配证据。
+
+## 二、修复
+
+| 项 | 修法 | 文件 |
+|---|---|---|
+| P0-1 | **内联** `runOutcome` + `settleRun`（与宿主 0.2.1 语义逐条对齐，含「永不 reject」「任何路径都 dispose」「aborted 无 diagnostic 才判 killed」），删除宿主 import | 新建 `src/run-settlement.js` |
+| P0-2 | 按**方法在不在**分叉（不赌版本号）：有 `startActivation` 走 `{provider,label,request,signal,delivery:'caller'}`，否则回退 `start(name, request)` | `src/reviewer.js` |
+| P0-2b | **超时必须显式 dispose**：`startActivation` 的 `signal` **只覆盖 admission**，不覆盖子代理执行期。不拆会话则评审卡死到自超时（默认 15 分钟） | `src/reviewer.js` |
+| P0-3 | 白名单改由 **Agent Preset** 承载：`cordis.patch.yml` 声明 `preset-skill-curator-review` → 内挂 `src/preset-guard.js` → 在**子代理自己的 scope** 调 `tools.restrict({allow: TOOL_NAMES})`。`order: 99` 避免抢默认位；名字标「勿选」（宿主无 hidden 标记，它会出现在选择器里） | `cordis.patch.yml` / `src/preset-guard.js` |
+
+## 三、新发现的第 4 项（守护测试当场抓到）
+
+`LlmAdapter` 基类 0.2.1 **新增 `imageRequestTarget`**（`dsh-llm/lib/index.js:1706`，抽象类签名见 `typert.host.js`）。鸭子对象拿不到基类默认实现 → 宿主 facade 的 `adapter.imageRequestTarget(...)` 表达式 TypeError，与 2026-09-10 那次 `imageRequestPricing` 同源。
+
+**这正是「宿主调用的方法名集合 ⊆ 插件适配器键集合」那条守护存在的意义**：升级夹具后它立刻变红并点名，无需真机复现。修法 = 补上并透传 `{width,height,maxBytes}`。
+
+## 四、变异测试（12 个变异体，11 个变红 = 守护有效）
+
+| 变异 | 结果 |
+|---|---|
+| 成功字段名改回 `output` / `killed` 改 `failed` / 去掉 `dispose` / 丢掉 `diagnostic===undefined` 判据 | 全红 |
+| `delivery` 从 `caller` 改 `parent`（结算通知回灌父会话） / 去掉 `agentPreset` / 超时不 dispose | 全红 |
+| 0.2.0 回退分支误传 `agentPreset` / preset-guard 白名单放宽 / preset `order` 改 1 / 重新引入宿主 `settleRun` import | 全红 |
+
+**两条被变异测试抓出的测试缺陷**：
+1. **M10 存活**：`new RegExp('id:\\s*' + NAME)` 会**前缀匹配**到 `id: skill-curator-review-typo` → 加行尾锚点 `$`（带 `m` 标志）才真正生效。
+2. **M7 挂起而非变红**：丢掉「abort → dispose」后 `settleRun` 永远等一个不收敛的 `result`，测试**跑挂**（2 分钟超时）而不是失败。修法是给异步断言加 `withDeadline` 截止时间 —— **「挂起」也是守护失效**，它不会被 CI 当成红灯。
+
+**方法学**：`test/_mutate.mjs` 用 `execFileSync` 跑变异（PowerShell 下 `node -e "..."` 的多行引号会被拆坏，导致变异**没落盘**→ 假绿；实测踩中一次，靠「变异后测试仍绿」的反常发现）。变异脚本在 `finally` 里还原，但**进程被杀时不会执行** → 实测留下过一次突变态文件，必须靠 `git diff` 核对。
+
+## 五、声明面
+
+- `version` → `0.2.1-rc.2`；4 个 peer 与 `dsh.engines.dsh` **逐字一致**地加 `|| >=0.2.1-alpha.0 <0.3.0`。
+- **0.2.1 段非冗余**（反证写进测试）：严格模式下 `>=0.2.0-alpha.0 <0.3.0` **不覆盖** `0.2.1-rc.2` —— npm 预发布可见性规则只认**同 `[major,minor,patch]` 元组**的预发布，`0.2.0-alpha.0` 的元组是 0.2.0，覆盖不到 0.2.1 的预发布。
+- devDependencies 4 个包升到 `0.2.1-rc.2`（**这一步才让假绿暴露**）。
+- `exports` 新增 `./preset-guard`。
+
+## 六、真机验收（三条活体证据）
+
+| 证据 | 值 |
+|---|---|
+| `include:skill-curator` | `enabled: true`, **`fiberPhase: "active"`**（修复前为 `null`） |
+| `include:preset-skill-curator-review` | **`active`**（宿主接受 preset 行：`entryListProblem` + mount 均通过） |
+| `GET /api/skill-curator/status` | `200`，`version: "0.2.1-rc.2"`（模块被真实重导入，VERSION 在加载期读 package.json） |
+
+重挂方式：`plugin_manager set_plugin` 先 `false` 再 `true`（行级重挂，**未重启 dsh 进程**）。
+
+## 七、诚实缺口
+
+- **未做**端到端真实评审：需要一次 3 轮真实对话触发，或手敲 `/skill-refine`。本次只验到「插件 active + preset active + 路由活 + 单测/契约测试全绿」。
+- **未验** preset 内 `tools.restrict()` 在真实子代理上的最终效果（单测覆盖到 guard 被调用与参数正确；宿主侧 `restrict` 的 scope 前提已按 `dsh-scope` 源码核对，但没跑过真子代理）。
+- **未处理** preset 会出现在用户可选列表里（宿主无 hidden 标记，只能靠 name/description 写「勿选」）。
+
+---
+
 ## 一、总体结论
 
 **无 P0/P1**；发现 2 个 P2、3 个 P3。测试 60 项 + smoke 11 组全绿；entry-smoke 以 `test/apply.test.mjs` 形式入库（真实加载 src/index.js + mock ctx 驱动全链路）——五仓中测试纪律最好。

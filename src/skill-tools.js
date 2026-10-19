@@ -30,6 +30,25 @@ export const CURATOR_AUTHOR = 'dsh-skill-curator'
 /** skill 名合法格式（对齐 dsh skill id 规则）。 */
 export const SKILL_ID = /^[a-z0-9][a-z0-9-]*$/
 
+/**
+ * 「skill-library-* 已注册完毕」的就绪标记服务名（preset-guard 的 inject 键）。
+ *
+ * 为什么需要：`tools.restrict()` 用 `view(scope).restrictableNames` 校验名字，
+ * 而它只收**继承面**（global 层 + 祖先链，dsh-tools/lib/index.js:3058-3070）。
+ * profile 各行由 `EntryGroup.update` 的 `Promise.all` **并发**创建
+ * （cordis-plugin-loader/lib/index.js:87-92）：preset 行只 inject `tools`，
+ * 本插件还要等 `settings` → preset 先跑完，此刻工具尚未注册 →
+ * restrict 抛 "names unknown global tools" → registry 把 `record.broken`
+ * 写死（"A mount failure is final"），preset **永久** broken。
+ *
+ * 解法：本插件在注册完工具后 `ctx.provide(TOOLS_READY_SERVICE, …)`，
+ * guard 用 `inject` 等它。等待中的 fiber 进 INACTIVE 不阻塞启动
+ * （cordis/lib/index.js:1320-1328），服务就绪后 `notify()` 会唤醒重试
+ * （:832-851）；registry 只在 `audit.failed` 时判 broken，`pending`
+ * 是设计允许的中间态（dsh-agent-preset-registry/lib/index.js:218-236）。
+ */
+export const TOOLS_READY_SERVICE = 'skillCuratorTools'
+
 /** 白名单工具全名（子代理 toolFilter allow 用）。 */
 export const TOOL_NAMES = [
   'skill-library-list',

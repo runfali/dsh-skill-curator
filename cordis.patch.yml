@@ -28,3 +28,28 @@
       name: 'dsh-skill-curator'
       config:
         skillsRoot: ""
+
+    # 评审子代理专用的 Agent Preset（dsh 0.2.1+ 的工具白名单载体）。
+    #
+    # 为什么必须走 preset：0.2.1 起宿主 `startLocal` 只把 agentPreset 写进 child
+    # composition，**`request.toolFilter` 全树零读取点**（0.2.0 的 startContinuable
+    # 会读它）；同时 dsh-tool-subagent 对 config.toolFilter 直接抛错并指向 preset。
+    # 不接这条，评审子代理会拿到父组合的全部工具（含 shell），而它读的是完整会话摘要。
+    #
+    # 机制：preset 独立挂载 → 子代理不继承父 preset 的工具面，只看到 global 层；
+    # preset 内挂 preset-guard 在**子代理自己的 scope** 上调 tools.restrict()，
+    # 把 global 面收敛到 skill-library-*。restrict 过滤的是继承面，
+    # 不影响本层注册 —— 与宿主 applyChildOverrides 同源语义。
+    #
+    # order=99：排在官方 preset 之后，避免误占默认选择位。
+    # 名字带「勿选」：宿主没有 hidden 标记，它会出现在 preset 选择器里。
+    - id: preset-skill-curator-review
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: skill-curator-review
+        name: '技能评审（内部，勿选）'
+        description: 'skill-curator 评审子代理专用：工具面被限制为 skill-library-*。手选此 preset 会失去常规工具。'
+        order: 99
+        plugins:
+          - id: preset-guard
+            name: 'dsh-skill-curator/preset-guard'

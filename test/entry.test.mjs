@@ -44,7 +44,7 @@ ok('宿主入口真实 import 成功（apply / name / inject / Config 面齐备�
 // ---------------------------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 assert.equal(typeof pkg.version, 'string', 'package.json 缺 version')
-assert.equal(pkg.version, '0.2.0-rc.1', '版本号必须跟宿主发布号（家族惯例）')
+assert.equal(pkg.version, '0.2.1-rc.2', '版本号必须跟宿主发布号（家族惯例）')
 assert.equal(pkg.type, 'module', '必须是 ESM 包')
 assert.equal(pkg.exports['.'], './src/index.js', 'exports["."] 必须指向宿主入口')
 assert.equal(pkg.exports['./client'], './lib/client.js', 'exports["./client"] 必须指向 client bundle')
@@ -142,6 +142,14 @@ const TABLE = [
   ['0.2.0-rc.1', true],
   ['0.2.0', true],
   ['0.2.3', true],
+  // 0.2.1 适配轮（2026-10-18）：宿主实测 0.2.1-rc.2（settleRun 与 subagents.start
+  // 双双移除，见 test/review-run-contract.test.mjs）→ 必须显式放行 0.2.1 预发布。
+  // 严格模式下 0.2.1-rc.2 不被 `>=0.2.0-alpha.0 <0.3.0` 覆盖（区间内无同元组预发布），
+  // 故新增的 0.2.1 段非冗余声明。
+  ['0.2.1-alpha.0', true],
+  ['0.2.1-rc.2', true],
+  ['0.2.1', true],
+  ['0.2.9', true],
   ['0.1.8', false],
   ['0.3.0', false],
   ['0.0.1', false]
@@ -149,7 +157,7 @@ const TABLE = [
 for (const [version, expected] of TABLE) {
   assert.equal(satisfies(version, range), expected, 'engines 区间对 ' + version + ' 的判定应为 ' + expected + '（区间=' + range + '）')
 }
-ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 / 0.1.7-rc.2 / 0.2.0 覆盖，0.1.8 与 0.3.0 排除）')
+ok('engines 判定表 ' + TABLE.length + ' 行逐行通过（含 0.1.5-rc.1 / 0.1.7-rc.2 / 0.2.0 / 0.2.1 覆盖，0.1.8 与 0.3.0 排除）')
 
 // 反证：旧单区间不覆盖预发布 —— 这正是必须加析取的原因
 assert.equal(satisfies('0.1.5-rc.1', '>=0.1.2-alpha.3 <0.2.0'), false, '旧单区间本不应覆盖 0.1.5-rc.1，判定器写反了')
@@ -163,6 +171,15 @@ const OLD_THREE_CLAUSE = '>=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=
 assert.equal(satisfies('0.2.0-rc.1', OLD_THREE_CLAUSE), false, '旧三段区间本不应覆盖 0.2.0-rc.1，判定器写反了')
 assert.equal(satisfies('0.2.0-rc.1', range), true, '新区间必须覆盖 0.2.0-rc.1')
 ok('反证：旧三段区间不覆盖 0.2.0-rc.1（故新段非冗余声明）')
+
+// 反证：0.2.1 适配轮——旧四段区间在**严格模式**下不覆盖 0.2.1-rc.2，故 0.2.1 段非冗余。
+// 根因是 npm 预发布可见性规则：`>=0.2.0-alpha.0 <0.3.0` 里带预发布的比较器只有 0.2.0-alpha.0
+// （元组 0.2.0），而 0.2.1-rc.2 的元组是 0.2.1 → 无同元组预发布 → 严格模式判 false。
+// 真机证据：不补该段时宿主启动闸会跳过整个 bundle（`skipping profile bundle`）。
+const OLD_FOUR_CLAUSE = OLD_THREE_CLAUSE + ' || >=0.2.0-alpha.0 <0.3.0'
+assert.equal(satisfies('0.2.1-rc.2', OLD_FOUR_CLAUSE), false, '旧四段区间本不应覆盖 0.2.1-rc.2，判定器写反了')
+assert.equal(satisfies('0.2.1-rc.2', range), true, '新区间必须覆盖 0.2.1-rc.2')
+ok('反证：旧四段区间不覆盖 0.2.1-rc.2（故 0.2.1 段非冗余声明）')
 
 // 交叉验证：同一判定表与宿主真实 semver 逐行一致（宿主不可解析则显式跳过，不假绿）
 // 解析路径按实测顺序（本仓 pnpm 布局）：semver 是 @deepseek-ai/dsh 的依赖，落点是

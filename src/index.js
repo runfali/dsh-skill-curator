@@ -29,8 +29,8 @@ import { Config, createSettings } from './settings.js'
 import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
-import { runSkillReview } from './reviewer.js'
-import { createSkillToolDefinitions, TOOL_NAMES, CURATOR_AUTHOR, skillsRoot, gitRootOf, runGit } from './skill-tools.js'
+import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
+import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, runGit } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
@@ -68,6 +68,30 @@ export function createReviewLog(overrideFile) {
 
 /** 默认历史存储（显式覆盖路径时由 apply 重建）。 */
 export let reviewLog = createReviewLog(undefined)
+
+/**
+ * 读取评审 preset 的活体状态（诊断用，永不抛错）。
+ *
+ * `agentPresets.list()` 每次调用都会重跑 `diagnostic()`（registry 源码
+ * :570-581），所以返回值是**当下**能不能组装会话，而不是 activate 时的一次性
+ * 快照——这正是排查「preset 永久 broken」时需要的东西（`record.broken` 只在
+ * activate 失败时写死，之后 Loader 行照样显示 active，看行状态会误判为正常）。
+ *
+ * @param {object} ctx - 宿主上下文（须能取到 agentPresets 服务）。
+ * @returns {Promise<{id:string, broken?:string}|{error:string}>} 该 preset 的状态。
+ */
+export async function reviewPresetStatus(ctx) {
+  try {
+    const registry = ctx.get('agentPresets')
+    if (!registry || typeof registry.list !== 'function') return { error: 'agentPresets service unavailable' }
+    const roster = await registry.list()
+    const row = roster.find((p) => p.id === REVIEW_AGENT_PRESET)
+    if (!row) return { error: `preset ${REVIEW_AGENT_PRESET} not declared` }
+    return row.broken === undefined ? { id: row.id, ok: true } : { id: row.id, broken: row.broken }
+  } catch (error) {
+    return { error: String((error && error.message) || error) }
+  }
+}
 
 /**
  * @param {object} ctx - cordis 上下文（settings/tools 注入）。
@@ -125,9 +149,16 @@ export function apply(ctx, config = {}) {
   for (const definition of createSkillToolDefinitions(() => settings.spec())) {
     ctx.tools.register(definition)
   }
+  // 就绪标记：必须在工具注册**之后**发布。preset 里的 preset-guard 靠它
+  // 决定何时调 tools.restrict({allow: TOOL_NAMES})——restrict 用
+  // view(scope).restrictableNames 校验名字，而它只收继承面
+  // （dsh-tools/lib/index.js:3058-3070），profile 各行又是 Promise.all 并发
+  // 创建的，抢先调用会抛 "names unknown global tools" 并被 registry 写死成
+  // 永久 broken。顺序颠倒 = 白名单守卫失效（详见 src/preset-guard.js 头注）。
+  ctx.provide(TOOLS_READY_SERVICE, { names: [...TOOL_NAMES] })
   ctx.logger.info(
     `skill-curator: registered ${TOOL_NAMES.length} skill-library tools ` +
-    `(curator author: ${CURATOR_AUTHOR})`
+    `(curator author: ${CURATOR_AUTHOR}); ${TOOLS_READY_SERVICE} ready`
   )
 
   // ---------------------------------------------------------------------
@@ -389,6 +420,13 @@ export function apply(ctx, config = {}) {
             version: VERSION,
             enabled: settings.spec().enabled,
             interval: settings.spec().skillNudgeInterval,
+            // 诊断：这两个字段只在带「就绪握手」的版本里存在，出现即证明新代码已载入。
+            toolsReadyService: TOOLS_READY_SERVICE,
+            // 验收判据：评审 preset 是否还能组装会话。registry.list() 每次读取都会
+            // 重跑 diagnostic()（dsh-agent-preset-registry/lib/index.js:570-581），
+            // 所以这里的 broken 是**活体**状态，不是 activate 时的一次性快照。
+            // 期望 'ok'；若为 broken 文本，说明 preset 里的 guard 仍在报错。
+            reviewPreset: await reviewPresetStatus(ctx),
             reviews: reviewLog.recent().slice(0, 5)
           })
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })

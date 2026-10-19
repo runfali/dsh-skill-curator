@@ -106,7 +106,7 @@ The review prompt carries a shape contract aimed squarely at "skills only ever g
 // package.json — machine-readable
 "engines": { "node": "^22.19.0 || >=24.0.0" },
 "peerDependencies": {          // the host runtime is the single source of truth; no bundled dsh-* copies
-  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0",
+  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0",
   "@deepseek-ai/dsh-settings": "…same…",
   "@deepseek-ai/dsh-subagent": "…same…",
   "@deepseek-ai/dsh-tools":    "…same…",
@@ -115,8 +115,8 @@ The review prompt carries a shape contract aimed squarely at "skills only ever g
 "devDependencies": { …local copies of the four dsh-* packages + schemastery… }  // no @deepseek-ai/dsh umbrella: it drags the whole host tree in
 ```
 
-- **Verified host**: `@deepseek-ai/dsh 0.1.7-rc.2` (Node v24).
-- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1` or `0.1.7-rc.2`. `test/entry.test.mjs` pins this with a 14-row decision table, a counter-proof (reverting to the old single range turns red), and a cross-check against the host's real `semver.satisfies`.
+- **Verified host**: `@deepseek-ai/dsh-desktop-runtime 0.2.1-rc.2` (Node v24) — real-machine verified, `/skill-refine` runs end to end.
+- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1` or `0.1.7-rc.2`, and the `0.2.0-alpha.0` group does **not** cover `0.2.1-rc.2` (its tuple is 0.2.1). `test/entry.test.mjs` pins this with a decision table, a counter-proof (reverting to the older range turns red), and a cross-check against the host's real `semver.satisfies`.
 - **0.1.7 settings contract (what this adaptation was about)**: `settings.installSection` was removed from dsh-settings. The namespace **is** the cordis row id, `Config` must be exported from the plugin module, and every live-editable field must be `.volatile()` (the host's `_commitVolatile` rewrites the live reference in place, no fiber restart). The settings card therefore hangs off `configForms.get(ns)` and the `plugins.item` slot.
 - **No install scripts, no gyp/native deps**: the whole tree is plain ESM; `test/entry.test.mjs` guards this (no `install`/`postinstall`/`prepare`, no `optionalDependencies`, dependency scope limited to `@deepseek-ai/*`).
 
@@ -132,14 +132,32 @@ node test/client-smoke.mjs  # client bundle smoke (real component-tree execution
 
 `docs/EVIDENCE.md` records the isolated-instance install/start/E2E run (disposable `DSH_HOME`, no deployed instance touched); `docs/AUDIT.md` records the audit rounds.
 
-## dsh 0.2.0-rc.1 适配结论
+## dsh 0.2.1-rc.2 适配结论
 
-对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.0-rc.1`）做了 asar 解包源码比对 +
-**真机闸实测**。要点：
+对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.1-rc.2`）做了 asar 解包源码比对 +
+真机验证。**0.2.1 是破坏性变更密集的一版**，光过兼容闸不够：
 
-- **唯一必改项是兼容区间**：原区间在 0.2.0-rc.1 下被启动闸拒绝
-  （`dsh: skipping profile bundle ...`），插件**整个 bundle 不加载**（web 与 desktop 同时失效）。
-  追加 `|| >=0.2.0-alpha.0 <0.3.0` 后放行。
+- **兼容闸只是入场券**：`dsh-subagent` 的包根**移除了 `settleRun` 导出**
+  （只剩 `settleRunResult`，实现搬进 `lib/types/run-settlement.js` 但无 `exports` 子路径可达）。
+  顶层 `import { settleRun }` 在 **ESM 链接期**抛 SyntaxError → `apply()` 从不执行 →
+  插件**整个失效**，而宿主只打一行 warning。修法：内联 `settleRun`（`src/run-settlement.js`），
+  与宿主语义逐条对齐。
+- **`subagents.start()` 被移除**：改为 `startActivation(spec)`（spec 多一层 `request`）。
+  按「方法在不在」运行时分叉，不赌版本号。注意 `startActivation` 的 `signal`
+  **只覆盖 admission**，超时必须显式 `dispose()`，否则评审卡到 15 分钟自超时。
+- **工具白名单从 `request` 层搬到 Agent Preset 层**：`startLocal` 只写
+  `composition: { agentPreset }`，本地起的子代理拿不到 `request.toolFilter`；
+  而 `dsh-tool-subagent` 对 `config.toolFilter` 直接抛错并指向 preset。
+  本插件因此声明了一个内部 preset（`skill-curator-review`），内挂
+  `src/preset-guard.js` 在子代理自己的 scope 上调 `tools.restrict({ allow })`。
+- **preset 守卫必须等就绪标记**（真机事故，详见 `docs/AUDIT.md` 第八轮）：
+  `restrict()` 用 `view(scope).restrictableNames` 校验名字，而它**只收继承面**；
+  profile 各行由 `Promise.all` 并发创建，preset 行只 inject `tools` 而本插件还要等
+  `settings` → preset 抢跑，那一刻工具还没注册 → 抛错 → registry 把 `record.broken`
+  **写死**（"A mount failure is final"），preset 永久 broken，而 Loader 行**照样显示 active**。
+  修法：本插件注册完工具后 `ctx.provide(TOOLS_READY_SERVICE, …)`，guard 用 `inject` 等它。
+- **`LlmAdapter` 基类新增 `imageRequestTarget`**：鸭子对象缺它必 TypeError
+  （与 `imageRequestPricing` 同源），守护测试当场抓到。
 - **闸只读 `peerDependencies`**：判定函数（`dsh-app-boot` 的
   `evaluatePluginCompatibility`）只遍历 `peerDependencies` 里 `@deepseek-ai/dsh*` 的条目，
   **从不读 `dsh.engines.dsh`**（全树 grep 零消费者）。两者必须逐字一致，测试已守护。
@@ -147,7 +165,11 @@ node test/client-smoke.mjs  # client bundle smoke (real component-tree execution
   于是**上界自身的预发布也被放行**（`<0.1.8` 放行 `0.1.8-rc.1`、`<0.3.0` 放行 `0.3.0-alpha.0`）；
   严格模式（pnpm 安装期）会拒绝它们。所以上界拦的是**正式版**，不是预发布。
   若要连预发布一起拒，上界须写成 `<0.3.0-0`。
-- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/DSH-0.2.0-ADAPTATION.md`。
+- **`set_plugin` 重挂不一定生效**：若某个包的 `realDir` 变了（例如刚跑过 `pnpm install`），
+  `ResolutionRouter.replace()` 抛 `ResolutionRestartRequired` → 返回
+  `restart-required / restartReason: "package-moved"`。此时**必须重启 dsh**；
+  而 preset 的 broken 是写死的，重挂也救不回来。
+- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/AUDIT.md`（第七、八轮）。
 
 
 ## License

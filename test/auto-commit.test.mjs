@@ -13,7 +13,7 @@ const mod = await import('../src/index.js')
 const { runGit } = await import('../src/skill-tools.js')
 
 function host(skillsRoot) {
-  const seen = { tools: [], listeners: new Map(), presentations: [], routes: [] }
+  const seen = { tools: [], listeners: new Map(), presentations: [], routes: [], provided: [] }
   const ctx = {
     fiber: { state: 2 },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
@@ -30,6 +30,7 @@ function host(skillsRoot) {
     },
     settings: { configure: (p) => { seen.presentations.push(p); return () => {} } },
     tools: { register: (d) => seen.tools.push(d) },
+    provide: (name, value) => { seen.provided.push({ name, value }); return () => {} },
     get: (k) => (k === 'commands' ? { register: () => () => {} } : undefined)
   }
   mkdirSync(skillsRoot, { recursive: true })
@@ -92,6 +93,7 @@ test('review completion auto-commits the skill library (real git, real plugin en
     },
     settings: { configure: () => () => {} },
     tools: { register: (d) => seen.tools.push(d) },
+    provide: (name, value) => { seen.provided.push({ name, value }); return () => {} },
     get: (k) => (k === 'subagents' ? subagents : k === 'commands' ? { register: (d) => { seen.__cmd = d; return () => {} } } : undefined)
   }
   mod.apply(ctx2, { skillsRoot: skills, backupRoot: mkdtempSync(join(tmpdir(), 'sc-ac-bk2-')) })

@@ -4,8 +4,10 @@ import {
   runSkillReview, ensureCustomAdapter, isEndpointModelFailure, CUSTOM_REVIEW_ROUTE, createReviewLog, routeIsMounted
 } from '../src/reviewer.js'
 import { createCustomAdapter, blocksToOpenAiText, openAiRole, streamChunksFromOpenAi } from '../src/custom-adapter.js'
-// 契约测试直连宿主真实 settleRun：字段名漂移只有它抓得住（本地 mock 会跟着写错）
-import { settleRun } from '@deepseek-ai/dsh-subagent'
+// 契约测试直连**本仓内联**的 settleRun：字段名漂移只有它抓得住（本地 mock 会跟着写错）。
+// 2026-10-18 适配轮：宿主 0.2.1-rc.2 已从包根移除该导出且无子路径可达，
+// 故不能再从 '@deepseek-ai/dsh-subagent' 导入（详见 test/review-run-contract.test.mjs）。
+import { settleRun } from '../src/run-settlement.js'
 
 test('契约：settleRun 成功分支的文本字段名随版本漂移（0.1.5=output / 0.1.7=result）', async () => {
   // 2026-09-28 实机 bug：reviewer 只读 outcome.output。0.1.7-rc.2 把它改名成 result
@@ -15,21 +17,19 @@ test('契约：settleRun 成功分支的文本字段名随版本漂移（0.1.5=o
   // 宿主导出实码对比：
   //   0.1.5-rc.1  dsh-subagent/lib/index.js:2675-2677 → { status:'completed', output: finalText(...) }
   //   0.1.7-rc.2  dsh-subagent/lib/index.js:2694-2696 → { status:'completed', result: finalText(...) }
-  // 本测试对**真实** settleRun 跑，断言「两个字段名里至少有一个是字符串」——
-  // 这样无论本地依赖副本是哪个版本都成立，上游再改名则会红。
+  //   0.2.1-rc.2  dsh-subagent/lib/types/run-settlement.js:33 → { status:'completed', result: finalText(...) }
+  // 本测试对内联实现跑，断言文本字段名 —— 上游再改名或本仓改回 output 都会红。
   const run = {
     result: Promise.resolve({ output: [{ type: 'text', text: '已更新 skill demo。' }], stopReason: 'completed' }),
     dispose: async () => {}
   }
   const outcome = await settleRun(run)
   assert.equal(outcome.status, 'completed')
-  const text = typeof outcome.result === 'string' ? outcome.result
-    : typeof outcome.output === 'string' ? outcome.output : undefined
-  assert.equal(typeof text, 'string', 'completed 分支必须带可读文本（result 或 output 之一）')
-  assert.equal(text, '已更新 skill demo。')
-  // 记录实测到的字段名，便于漂移时定位
-  const shape = outcome.result !== undefined ? 'result(0.1.7)' : 'output(0.1.5)'
-  assert.ok(shape, 'detected shape: ' + shape)
+  // 内联实现下字段名是确定的：必须是 result（0.2.1 语义）。
+  // 断言「至少有一个」会让 output 回退掩盖漂移，这里收紧成精确字段。
+  assert.equal(typeof outcome.result, 'string', 'completed 分支必须带 result 文本（0.2.1 字段名）')
+  assert.equal(outcome.result, '已更新 skill demo。')
+  assert.equal(outcome.output, undefined, '内联实现不得再产生 output 字段')
 })
 
 test('契约：settleRun 失败分支的 detail 字段', async () => {
@@ -363,8 +363,10 @@ test('custom adapter sends attribution user-agent header', async () => {
 // ---------------------------------------------------------------------------
 test('adapter surface: every LlmAdapter base-class method is implemented', async () => {
   const adapter = createCustomAdapter(() => ({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm' }), 'probe-route')
-  // 基类的六个具体实现 + 唯一的 abstract stream = 宿主可能调用的全集
-  const BASE_METHODS = ['providerInfo', 'providerRetryPolicy', 'imageRequestPricing', 'listModels', 'resolveModel', 'prepareCall', 'stream']
+  // 基类的具体实现 + 唯一的 abstract stream = 宿主可能调用的全集。
+  // 0.2.1-rc.2 新增 imageRequestTarget（dsh-llm lib/index.js:1706，声明见
+  // typert.host.js 的抽象类签名）——本仓守护测试当场抓到，见下条行为断言。
+  const BASE_METHODS = ['providerInfo', 'providerRetryPolicy', 'imageRequestPricing', 'imageRequestTarget', 'listModels', 'resolveModel', 'prepareCall', 'stream']
   for (const name of BASE_METHODS) {
     assert.equal(typeof adapter[name], 'function', 'adapter 缺方法 ' + name + '（鸭子对象不会继承 LlmAdapter 基类实现）')
   }
@@ -402,6 +404,26 @@ test('adapter surface: imageRequestPricing regression — missing method breaks 
     /is not a function/,
     '宿主 facade 表达式在方法缺失时必须抛 TypeError（守护有效性反证）'
   )
+})
+
+test('adapter surface: imageRequestTarget 存在且与基类默认语义一致（0.2.1 新增）', () => {
+  // 0.2.1-rc.2 给 LlmAdapter 基类加了 imageRequestTarget（lib/index.js:1706），
+  // 声明面见 typert.host.js 的抽象类签名。鸭子对象拿不到基类默认实现，
+  // 缺它则宿主 facade 的 `adapter.imageRequestTarget(...)` 表达式 TypeError。
+  const adapter = createCustomAdapter(() => ({ reviewBaseUrl: 'http://x/v1', reviewModel: 'm' }), 'probe-route-3')
+  assert.equal(typeof adapter.imageRequestTarget, 'function', 'adapter 缺 imageRequestTarget')
+  // 基类语义：原样透传归一化图片的尺寸与字节预算（不缩放）。
+  const target = adapter.imageRequestTarget('probe-route-3', 'm', { width: 800, height: 600, bytes: 123456 })
+  assert.deepEqual(target, { width: 800, height: 600, maxBytes: 123456 })
+  // 反证：删掉即复现宿主 facade 的 TypeError
+  const registry = new Map([['probe-route-3', { adapter: { ...adapter } }]])
+  const stripped = new Map([['probe-route-3', { adapter: Object.fromEntries(Object.entries(adapter).filter(([k]) => k !== 'imageRequestTarget')) }]])
+  assert.throws(
+    () => stripped.get('probe-route-3')?.adapter.imageRequestTarget('probe-route-3', 'm', {}),
+    /is not a function/,
+    '守护有效性反证'
+  )
+  void registry
 })
 // ---------------------------------------------------------------------------
 // 路由存活守护：插件 fiber 卸载后必须能**重注册**（2026-09-10 适配轮抓到的存量缺陷）

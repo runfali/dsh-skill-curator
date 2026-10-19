@@ -112,7 +112,7 @@ dsh plugin --profile web add ./
 // package.json（机器可读）
 "engines": { "node": "^22.19.0 || >=24.0.0" },
 "peerDependencies": {            // 宿主运行时是唯一事实来源，插件不再自带 dsh-* 实体副本
-  "@deepseek-ai/dsh-llm":       ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0",
+  "@deepseek-ai/dsh-llm":       ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0",
   "@deepseek-ai/dsh-settings":  "…same…",
   "@deepseek-ai/dsh-subagent":  "…same…",
   "@deepseek-ai/dsh-tools":     "…same…",
@@ -121,8 +121,8 @@ dsh plugin --profile web add ./
 "devDependencies": { …同 4 个 dsh-* 的本地副本 + schemastery… }   // 不装 @deepseek-ai/dsh 伞包：它会把整棵宿主依赖树拖进来
 ```
 
-- **已验证宿主**：`@deepseek-ai/dsh 0.1.7-rc.2`（Node v24）。
-- **区间里的析取是承重的**：npm semver 只从「区间组自身含同 `[major,minor,patch]` 元组预发布」的组满足预发布，故单区间 `<0.2.0` 那组**覆盖不了** `0.1.5-rc.1` / `0.1.7-rc.2`。`test/entry.test.mjs` 用 14 行判定表 + 反证（改回旧区间即红）+ 宿主真实 `semver.satisfies` 交叉验证钉住。
+- **已验证宿主**：`@deepseek-ai/dsh-desktop-runtime 0.2.1-rc.2`（Node v24）—— 真机验证，`/skill-refine` 端到端可跑。
+- **区间里的析取是承重的**：npm semver 只从「区间组自身含同 `[major,minor,patch]` 元组预发布」的组满足预发布，故单区间 `<0.2.0` 那组**覆盖不了** `0.1.5-rc.1` / `0.1.7-rc.2`，而 `0.2.0-alpha.0` 那组也**覆盖不了** `0.2.1-rc.2`（元组是 0.2.1）。`test/entry.test.mjs` 用判定表 + 反证（改回旧区间即红）+ 宿主真实 `semver.satisfies` 交叉验证钉住。
 - **0.1.7 设置契约（本插件的适配要点）**：`settings.installSection` 已从 dsh-settings 移除；命名空间 = cordis 行 id，`Config` 必须从插件模块导出，可热编辑字段必须 `.volatile()`（宿主 `_commitVolatile` 原地写活引用，不重启 fiber）。因此插件页设置卡走 `configForms.get(ns)` + `plugins.item` 槽位。
 - **无安装脚本、禁 gyp/原生编译**：全树纯 ESM，`test/entry.test.mjs` 守护（无 `install`/`postinstall`/`prepare`、无 `optionalDependencies`、依赖面仅 `@deepseek-ai/*`）。
 
@@ -138,14 +138,32 @@ node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
 
 `docs/EVIDENCE.md` 记录隔离实例的安装/启动/真机验证（一次性 `DSH_HOME`，不碰任何已部署实例）；`docs/AUDIT.md` 记录各轮审计。
 
-## dsh 0.2.0-rc.1 适配结论
+## dsh 0.2.1-rc.2 适配结论
 
-对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.0-rc.1`）做了 asar 解包源码比对 +
-**真机闸实测**。要点：
+对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.1-rc.2`）做了 asar 解包源码比对 +
+真机验证。**0.2.1 是破坏性变更密集的一版**，光过兼容闸不够：
 
-- **唯一必改项是兼容区间**：原区间在 0.2.0-rc.1 下被启动闸拒绝
-  （`dsh: skipping profile bundle ...`），插件**整个 bundle 不加载**（web 与 desktop 同时失效）。
-  追加 `|| >=0.2.0-alpha.0 <0.3.0` 后放行。
+- **兼容闸只是入场券**：`dsh-subagent` 的包根**移除了 `settleRun` 导出**
+  （只剩 `settleRunResult`，实现搬进 `lib/types/run-settlement.js` 但无 `exports` 子路径可达）。
+  顶层 `import { settleRun }` 在 **ESM 链接期**抛 SyntaxError → `apply()` 从不执行 →
+  插件**整个失效**，而宿主只打一行 warning。修法：内联 `settleRun`（`src/run-settlement.js`），
+  与宿主语义逐条对齐。
+- **`subagents.start()` 被移除**：改为 `startActivation(spec)`（spec 多一层 `request`）。
+  按「方法在不在」运行时分叉，不赌版本号。注意 `startActivation` 的 `signal`
+  **只覆盖 admission**，超时必须显式 `dispose()`，否则评审卡到 15 分钟自超时。
+- **工具白名单从 `request` 层搬到 Agent Preset 层**：`startLocal` 只写
+  `composition: { agentPreset }`，本地起的子代理拿不到 `request.toolFilter`；
+  而 `dsh-tool-subagent` 对 `config.toolFilter` 直接抛错并指向 preset。
+  本插件因此声明了一个内部 preset（`skill-curator-review`），内挂
+  `src/preset-guard.js` 在子代理自己的 scope 上调 `tools.restrict({ allow })`。
+- **preset 守卫必须等就绪标记**（真机事故，详见 `docs/AUDIT.md` 第八轮）：
+  `restrict()` 用 `view(scope).restrictableNames` 校验名字，而它**只收继承面**；
+  profile 各行由 `Promise.all` 并发创建，preset 行只 inject `tools` 而本插件还要等
+  `settings` → preset 抢跑，那一刻工具还没注册 → 抛错 → registry 把 `record.broken`
+  **写死**（"A mount failure is final"），preset 永久 broken，而 Loader 行**照样显示 active**。
+  修法：本插件注册完工具后 `ctx.provide(TOOLS_READY_SERVICE, …)`，guard 用 `inject` 等它。
+- **`LlmAdapter` 基类新增 `imageRequestTarget`**：鸭子对象缺它必 TypeError
+  （与 `imageRequestPricing` 同源），守护测试当场抓到。
 - **闸只读 `peerDependencies`**：判定函数（`dsh-app-boot` 的
   `evaluatePluginCompatibility`）只遍历 `peerDependencies` 里 `@deepseek-ai/dsh*` 的条目，
   **从不读 `dsh.engines.dsh`**（全树 grep 零消费者）。两者必须逐字一致，测试已守护。
@@ -153,7 +171,11 @@ node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
   于是**上界自身的预发布也被放行**（`<0.1.8` 放行 `0.1.8-rc.1`、`<0.3.0` 放行 `0.3.0-alpha.0`）；
   严格模式（pnpm 安装期）会拒绝它们。所以上界拦的是**正式版**，不是预发布。
   若要连预发布一起拒，上界须写成 `<0.3.0-0`。
-- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/DSH-0.2.0-ADAPTATION.md`。
+- **`set_plugin` 重挂不一定生效**：若某个包的 `realDir` 变了（例如刚跑过 `pnpm install`），
+  `ResolutionRouter.replace()` 抛 `ResolutionRestartRequired` → 返回
+  `restart-required / restartReason: "package-moved"`。此时**必须重启 dsh**；
+  而 preset 的 broken 是写死的，重挂也救不回来。
+- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/AUDIT.md`（第七、八轮）。
 
 
 ## License
