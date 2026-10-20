@@ -1178,6 +1178,73 @@ test('status 接口回显 config 里的 archiveEnabled 与 lifecycle 摘要', as
 })
 
 // ---------------------------------------------------------------------------
+// status 请求必须对账磁盘（不评审也要及时）
+// ---------------------------------------------------------------------------
+// 真机缺口（2026-10-20 发哥指出）：syncWith 只在**评审跑完**时执行，而评审间隔是
+// 3 轮对话。于是「新建/删除/手工恢复一个技能」后，面板要等下一次评审才反映——
+// 极端情况（一直不触发评审）永远不刷新，只能重启 dsh。这不合常理：
+// 生命周期面板展示的是「磁盘现状 + 使用记录」，磁盘变了就该立刻看到。
+//
+// 但这条对账**绝不能**变成写操作：status 被 UI 每 30 秒轮询一次，
+// 在只读轮询里跑 transitions()（会标 stale / 归档）等于把轮询变成破坏性动作。
+test('status 请求后，磁盘上新增的技能立刻出现在面板（不必等评审/重启）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const t = env.__test
+  const route = t.routes.find((r) => r.path === '/api/skill-curator/status')
+  const hit = () => new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+
+  // 模拟「你刚新建了一个技能」——只在磁盘上，没经过评审、也没重启
+  mkdirSync(join(t.skillsRoot, 'brand-new-skill'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'brand-new-skill', 'SKILL.md'), '---\nname: brand-new-skill\ndescription: d\n---\n\n# x\n')
+
+  const body = await hit()
+  assert.deepEqual(body.lifecycle.active, ['brand-new-skill'], 'status 必须自己发现磁盘新增的技能（首次请求就对账）')
+})
+
+test('status 的磁盘对账有 5s 节流（不重复扫盘）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const t = env.__test
+  const route = t.routes.find((r) => r.path === '/api/skill-curator/status')
+  const hit = () => new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  await hit() // 第一次：立即对账
+  mkdirSync(join(t.skillsRoot, 'during-window'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'during-window', 'SKILL.md'), '---\nname: during-window\ndescription: d\n---\n\n# x\n')
+  const second = await hit()
+  assert.deepEqual(second.lifecycle.active, [], '节流窗口内不重复扫盘（下一次请求会补上）')
+})
+
+test('status 的磁盘对账绝不做写操作（不标 stale、不归档）', async () => {
+  const env = makeCtx({})
+  // archiveEnabled 开着也不会在轮询里归档 —— 轮询是只读的
+  applyIn(env, { __webServerReady: true, archiveEnabled: { get: () => true }, archiveDays: { get: () => 1 } })
+  const t = env.__test
+  mkdirSync(join(t.skillsRoot, 'very-old-skill'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'very-old-skill', 'SKILL.md'), '---\nname: very-old-skill\ndescription: d\n---\n\n# x\n')
+  t.lifecycle.markUsed('very-old-skill', { now: Date.now() - 300 * 86400000 })
+  // 让它先被登记（模拟评审已经跑过）
+  t.lifecycle.syncWith(t.skillsRoot, ['very-old-skill'])
+
+  const route = t.routes.find((r) => r.path === '/api/skill-curator/status')
+  const body = await new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+
+  assert.ok(body.lifecycle.wouldArchive.includes('very-old-skill'), '面板应当把它列为候选')
+  assert.ok(readdirSync(t.skillsRoot).includes('very-old-skill'), '但轮询绝不能真的归档它（磁盘必须原样）')
+  assert.ok(!existsSync(join(t.lifecycle.archiveRoot, 'very-old-skill')), '归档目录必须为空')
+  assert.deepEqual(body.lifecycle.stale, [], '轮询也不能改 stale 状态（那是 transitions 的事）')
+})
+
+// ---------------------------------------------------------------------------
 // POST /api/skill-curator/archive —— UI 一键归档
 // ---------------------------------------------------------------------------
 // 破坏性动作（移目录，可 restore）必须守三件事：

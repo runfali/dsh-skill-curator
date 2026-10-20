@@ -49,6 +49,42 @@ export { Config }
 const MAX_ARCHIVE_BATCH = 50
 /** UI 归档请求体上限（50 个技能名 × ~64 字节，留足余量）。 */
 const MAX_ARCHIVE_BODY_BYTES = 64 * 1024
+/**
+ * status 磁盘对账的最小间隔（毫秒）。
+ *
+ * 为什么需要：面板每 30 秒轮询一次 /status，而对账要 readdir 整个技能库。
+ * 68 个目录只需几毫秒，但节流能防止「多个面板同时开着 / 快速刷新」时的重复扫描。
+ */
+const STATUS_RECONCILE_MS = 5_000
+
+/**
+ * 让生命周期表跟磁盘对账（只登记/清理/复活，**绝不**改使用时间戳、绝不归档）。
+ *
+ * 为什么挂在 status 上：syncWith 原本只在评审收尾时跑，而评审间隔 3 轮对话 ——
+ * 「刚新建 / 删除 / git 恢复一个技能」后，面板要等下一轮评审才反映，极端情况下
+ * 永远不刷新（只能重启 dsh）。面板展示的是磁盘现状，磁盘变了就该立刻看到。
+ *
+ * 为什么**不**在这里跑 transitions()：status 是 UI 每 30 秒轮询的只读接口，
+ * 在里面标 stale / 归档等于把轮询变成破坏性操作。判定留给评审。
+ *
+ * @param {object} lifecycle - createLifecycleStore 的实例。
+ * @param {object} spec - 当前生效设置（要 skillsRoot / excludedSkills）。
+ * @param {{ran:boolean, reason?:string, seeded?:number, dropped?:number, restored?:number}} state
+ *   调用方的节流状态（闭包持有，测试可各自独立）。
+ * @returns {Promise<object>}
+ */
+async function reconcileLifecycle(lifecycle, spec, state, nowMs = Date.now()) {
+  if (nowMs - state.at < STATUS_RECONCILE_MS) return { ran: false, reason: 'throttled' }
+  state.at = nowMs
+  try {
+    const excluded = Array.isArray(spec.excludedSkills) ? spec.excludedSkills.map(String) : []
+    const names = (await listSkills(skillsRoot(spec), excluded)).map((k) => k.name)
+    return { ran: true, ...lifecycle.syncWith(skillsRoot(spec), names) }
+  } catch (error) {
+    // 对账失败绝不能拖垮 status：面板看上一份快照，总比报 500 好。
+    return { ran: false, reason: String((error && error.message) || error) }
+  }
+}
 
 /**
  * 读取请求体（带上限）。超限返回 null —— 调用方回 413。
@@ -507,6 +543,10 @@ export function apply(ctx, config = {}) {
   // 用一次性 ctx.get('webServer') 会在服务未就绪时静默空转（状态接口永不注册，
   // 设置卡「最近评审」永远拿不到数据，且没有任何报错）。正确形态是 ctx.inject 等待就绪。
   const LOOPBACK = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i
+  // status 磁盘对账的节流状态（每次 apply 一份，随 fiber 一起走）。
+  // at = -Infinity：**第一次请求必须立即对账**，否则「启动后首次打开面板」
+  // 要等 5s 节流窗口，看起来像面板没数据。
+  const reconcileState = { at: -Infinity }
   const sameOrigin = (req) => {
     // 同源守卫（对齐 dsh-config-center 先例）：/api 信任围栏校验 Host/Origin
     const host = String(req.headers && (req.headers.host || req.headers.Host) || '')
@@ -537,12 +577,17 @@ export function apply(ctx, config = {}) {
             res.end('method not allowed')
             return
           }
+          const spec = settings.spec()
+          // 磁盘对账：不评审也要「及时」。只 syncWith（登记/清理/复活），
+          // 不跑 transitions —— status 是只读轮询，绝不能在这里标 stale / 归档。
+          // 节流 5s，防止多面板/快速刷新重复 readdir。
+          await reconcileLifecycle(lifecycle, spec, reconcileState)
           const body = JSON.stringify({
             ok: true,
             name,
             version: VERSION,
-            enabled: settings.spec().enabled,
-            interval: settings.spec().skillNudgeInterval,
+            enabled: spec.enabled,
+            interval: spec.skillNudgeInterval,
             // 诊断：这两个字段只在带「就绪握手」的版本里存在，出现即证明新代码已载入。
             toolsReadyService: TOOLS_READY_SERVICE,
             // 验收判据：评审 preset 是否还能组装会话。registry.list() 每次读取都会
@@ -552,8 +597,8 @@ export function apply(ctx, config = {}) {
             reviewPreset: await reviewPresetStatus(ctx),
             // 传 archiveDays 才带 wouldArchive —— UI「够格归档」的候选集必须与
             // transitions() 同源，否则面板会推荐一个 archive() 拒绝做的动作。
-            lifecycle: lifecycle.summary({ archiveDays: settings.spec().archiveDays }),
-            archiveEnabled: settings.spec().archiveEnabled,
+            lifecycle: lifecycle.summary({ archiveDays: spec.archiveDays }),
+            archiveEnabled: spec.archiveEnabled,
             reviews: reviewLog.recent().slice(0, 5)
           })
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
