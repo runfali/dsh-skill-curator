@@ -31,8 +31,43 @@ function addSkill(root, name) {
   return dir
 }
 
-test('新技能被登记为 active，lastUsedAt 为 null（从未使用）', () => {
+// ---------------------------------------------------------------------------
+// 运行时技能（skill-curator）必须能在 syncWith 后存活
+// ---------------------------------------------------------------------------
+// 真机实测（2026-10-20）：加载 `skill-curator` 运行时技能 → markUsed 写进状态表
+// → 下一轮评审 syncWith() 按**磁盘技能列表**重建 → 它不在磁盘上 → 被当「已消失」
+// 删掉，`lastUsedAt` 归零、状态表里再也查不到。运行时技能由插件 skills.register
+// 注册，**磁盘上没有目录**，与「真的被删掉的技能」必须区分开。
+test('syncWith 不得删除磁盘上不存在的技能（运行时技能 skill-curator）', () => {
   const { root, store } = fixture()
+  addSkill(root, 'on-disk-skill')
+  // 运行时技能：不在磁盘上，只有 markUsed 记过它
+  store.markUsed('skill-curator', { now: Date.now() })
+  assert.ok(store.snapshot().skills['skill-curator'], '前置：markUsed 已登记运行时技能')
+
+  const counts = store.syncWith(root) // 磁盘上只有 on-disk-skill
+
+  assert.ok(
+    store.snapshot().skills['skill-curator'],
+    '磁盘上没有的技能不得被 syncWith 删掉（运行时技能会被误删）'
+  )
+  assert.equal(counts.dropped, 0, '不得把它计入 dropped')
+  assert.ok(store.snapshot().skills['on-disk-skill'], '磁盘上的技能照常登记')
+})
+
+test('syncWith 仍能清掉「曾经在磁盘上、现已消失」的技能', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'gone-skill')
+  store.syncWith(root)
+  assert.ok(store.snapshot().skills['gone-skill'], '前置：先登记')
+  // 从磁盘移走
+  renameSync(join(root, 'gone-skill'), join(root, 'moved-away'))
+  const counts = store.syncWith(root)
+  assert.equal(store.snapshot().skills['gone-skill'], undefined, '磁盘上真消失的技能必须被清掉')
+  assert.equal(counts.dropped, 1)
+})
+
+test('新技能被登记为 active，lastUsedAt 为 null（从未使用）', () => {  const { root, store } = fixture()
   addSkill(root, 'alpha-skill')
   const counts = store.syncWith(root)
   assert.equal(counts.seeded, 1)

@@ -80,7 +80,18 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
   /** 登记一个技能（已存在则不动）。 */
   function ensure(name, now = Date.now()) {
     if (!state.skills[name]) {
-      state.skills[name] = { state: 'active', firstSeenAt: now, lastUsedAt: null, archivedAt: null, pinned: false }
+      state.skills[name] = {
+        state: 'active',
+        firstSeenAt: now,
+        lastUsedAt: null,
+        archivedAt: null,
+        pinned: false,
+        // 来源标记：'disk' = 由 syncWith 从技能库磁盘登记；'runtime' = 只被
+        // markUsed 记过、磁盘上没有目录（插件 skills.register 的运行时技能）。
+        // 缺它的话 syncWith 的 dropped 循环分不清「运行时技能」与「真被删掉的技能」，
+        // 会把 skill-curator 每轮评审都清掉（2026-10-20 真机实测）。
+        origin: 'runtime'
+      }
     }
     return state.skills[name]
   }
@@ -140,10 +151,12 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       for (const name of list) {
         const rec = state.skills[name]
         if (!rec) {
-          ensure(name)
+          ensure(name).origin = 'disk'
           seeded += 1
           continue
         }
+        // 磁盘上出现过 = 它是磁盘技能（可能是运行时技能同名，但以磁盘为准）
+        rec.origin = 'disk'
         // 目录重新出现而状态仍是 archived = 已被恢复（技能库是 git 工作树，
         // `git checkout` 就能把归档目录放回来，绕过 restore 工具）。
         // 不重置的话：transitions() 只按 ageDays 判定，而 archived 记录既不会
@@ -158,7 +171,14 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       }
       let dropped = 0
       for (const name of Object.keys(state.skills)) {
-        if (!seen.has(name) && state.skills[name].state !== 'archived') {
+        const rec = state.skills[name]
+        // 只清「曾经是磁盘技能、现在磁盘上没有」的条目。
+        // 运行时技能（origin === 'runtime'，如 skill-curator）在磁盘上**永远没有**
+        // 目录，不能因为它不在 list 里就删 —— 那会让它每轮评审都消失（2026-10-20
+        // 真机实测：加载 skill-curator → 下一轮 syncWith 后状态表里查不到）。
+        // archived 同样豁免：归档目录在技能库之外，本来就不在 list 里。
+        if (rec.origin === 'runtime') continue
+        if (!seen.has(name) && rec.state !== 'archived') {
           delete state.skills[name]
           dropped += 1
         }
