@@ -11,7 +11,7 @@
  * 不能像 dsh-learn 那样只写在 whenToUse 里（那样模型看不到）。
  *
  * rank 说明（方向别写反）：运行时技能 rank=250，用户目录 rank=400
- * （dsh-skill-filesystem:23 `USER_DSH_RANK`）。宿主按 rank **升序**排序、
+ * （dsh-skill-filesystem:24 `USER_DSH_RANK`）。宿主按 rank **升序**排序、
  * 去重时**第一个胜出**（dsh-skill/lib/index.js:519-521 `compareIndexedCandidates`
  * 返回 `left.rank - right.rank`；:314-325 排序后遍历 `seen` 去重）——
  * 所以 **rank 250 的运行时版压过 rank 400 的用户目录版**。
@@ -60,7 +60,8 @@ export const CURATOR_SKILL = {
     '',
     '## 生命周期',
     '',
-    '`skill-library-lifecycle` 可查每个技能的状态与最后使用时间（active / stale / archived / pinned）。',
+    '`skill-library-lifecycle` 的 `list` 给出**状态分桶**（active / stale / archived / neverUsed）、',
+    '`pinned` 名单与 `lastPassAt`（上一轮评审时间）——**不含逐技能的最后使用时间戳**。',
     '「最后使用」按 `skill` 工具真实加载计算，不是文件修改时间。'
   ].join('\n')
 }

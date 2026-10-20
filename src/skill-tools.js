@@ -828,9 +828,11 @@ export function createSkillToolDefinitions(getConfig, getLifecycle = () => undef
     ),
     tool(
       'skill-library-lifecycle',
-      'Inspect or maintain the lifecycle of skills in the library: list (per-skill state active/stale/archived, ' +
-        'last-used time, pinned), archive (move a skill out of the library into the curator archive — recoverable, ' +
-        'never deleted), restore (bring an archived skill back), pin (exempt a skill from stale/archive forever). ' +
+      'Inspect or maintain the lifecycle of skills in the library. list returns the state buckets ' +
+        '(active / stale / archived / neverUsed), the pinned name list, and lastPassAt — state buckets, ' +
+        'not per-skill timestamps. archive (move a skill out of the library into the curator archive — ' +
+        'recoverable, never deleted), restore (bring an archived skill back), pin (exempt a skill from ' +
+        'stale/archive forever). ' +
         'Use this instead of deleting a skill that merely looks unused — archiving is reversible.',
       {
         action: { type: 'string', required: true, enum: ['list', 'archive', 'restore', 'pin'] },

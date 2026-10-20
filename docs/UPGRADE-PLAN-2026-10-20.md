@@ -57,7 +57,7 @@
 | pin 存哪 | `lifecycle.json` 数据（不是 Config） | pin 是数据不是配置；也避免再多一个 Config 字段 |
 | 归档后是否可被工具读回 | `skill-library-list` 增列 archived；`skill-library-lifecycle` 支持 restore | 与 dsh-learn「归档可恢复，绝不删除」同义，但修掉它 `rmSync(dst)` 先删旧归档的缺陷 |
 | 运行时技能关键信息放哪 | **全部进 `description`**（因为 catalog 只渲染 description），`whenToUse` 只作补充 | 实测 `catalogSourceEntries` 不渲染 whenToUse；照 dsh-learn 那样把用法只写进 whenToUse = 模型看不到 |
-| 运行时技能名 | `skill-curator`（已核：技能库无同名） | 若日后有同名用户技能，rank 400 > 250，用户版胜出（不是报错，是遮蔽） |
+| 运行时技能名 | `skill-curator`（已核：技能库无同名） | 若日后有同名用户技能，rank 250 < 400（升序 + first-wins），**运行时版胜出**（不是报错，是遮蔽） |
 
 ---
 
@@ -1073,8 +1073,9 @@ Expected: FAIL —— `Cannot find module '../src/runtime-skill.js'`
  * `whenToUse` **不进**模型可见目录。所以「怎么用」必须写进 description，
  * 不能像 dsh-learn 那样只写在 whenToUse 里（那样模型看不到）。
  *
- * rank 说明：运行时技能 rank=250，用户目录 rank=400（dsh-skill-filesystem:174）。
- * 若技能库里日后出现同名 `skill-curator`，用户版胜出（遮蔽，不是报错）。
+ * rank 说明（方向别写反）：运行时技能 rank=250，用户目录 rank=400（dsh-skill-filesystem:24 `USER_DSH_RANK`）。
+ * 宿主按 rank **升序**排序、去重时**第一个胜出**，所以 **rank 250 的运行时版压过 rank 400 的用户目录版**。
+ * 若技能库里日后出现同名 `skill-curator`，用户版被静默遮蔽（不是报错）。
  */
 import { TOOL_NAMES } from './skill-tools.js'
 
@@ -1203,7 +1204,7 @@ Each skill is tracked as `active → stale → archived` by **real use** (a `ski
 
 - `staleDays` (default 30) / `archiveDays` (default 90) — windows
 - `archiveEnabled` (default **off**) — off means the review only *reports* which skills are eligible; nothing on disk moves
-- `pinnedSkills` — pin a skill via `skill-library-lifecycle` and it is exempt forever
+- pin is **not** a setting: it is a runtime action of `skill-library-lifecycle` (action=pin), stored as lifecycle data — a pinned skill is exempt from stale/archive forever
 - Archived skills move to `<DSH_HOME>/skill-curator/archived/<name>/` — **outside** the library, so the host does not discover them, and `restore` brings them back
 
 The plugin also registers a runtime skill named `skill-curator` so the model knows how to use the eleven `skill-library-*` tools.

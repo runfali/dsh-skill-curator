@@ -271,6 +271,29 @@ for (const literal of ['off', 'on', 'verbose']) {
 ok('键集合逐键相等（host Config ↔ client FIELDS，共 ' + hostKeys.length + ' 键）+ notifyMode 枚举三字面量一致')
 
 // ---------------------------------------------------------------------------
+// 5b. FIELDS ⊆ GROUPS（集合覆盖守护）
+//     面板只渲染 GROUPS 里列出的键 —— 一个字段进了 FIELDS 却漏进 GROUPS 的
+//     keys，就等于「设置页里静默消失」：键集合守卫（上面那条）照样全绿，
+//     因为两边 FIELDS/Config 都有它。实测把 group.base 的 "notifyMode" 去掉，
+//     全套 client-smoke 8/8 依然绿。
+// ---------------------------------------------------------------------------
+const groupsBlock = /const GROUPS = \[([\s\S]*?)\n    \]/.exec(clientSrc)
+assert.ok(groupsBlock, 'lib/client.js 里找不到 GROUPS（覆盖守卫失效）')
+const groupedKeys = new Set([...groupsBlock[1].matchAll(/keys: \[([^\]]*)\]/g)]
+  .flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((k) => k[1])))
+const ungrouped = clientKeys.filter((k) => !groupedKeys.has(k))
+assert.deepEqual(
+  ungrouped,
+  [],
+  'FIELDS 里每个键都必须出现在某个 GROUPS.keys 里（漏掉 = 设置页静默少一个开关）：' + ungrouped.join(', ')
+)
+// 反向也守：GROUPS 引用的键必须在 FIELDS 里，否则渲染期 FIELDS.find() 返回
+// undefined → spec.type 直接 TypeError 崩掉整张卡片。
+const phantom = [...groupedKeys].filter((k) => !clientKeys.includes(k))
+assert.deepEqual(phantom, [], 'GROUPS 引用了 FIELDS 里不存在的键（渲染期会 TypeError）：' + phantom.join(', '))
+ok('FIELDS ⊆ GROUPS.keys 且 GROUPS.keys ⊆ FIELDS（共 ' + clientKeys.length + ' 键全覆盖）')
+
+// ---------------------------------------------------------------------------
 // 6. 依赖卫生（家族硬要求：无安装脚本副作用 / 无原生编译 / 仅 @deepseek-ai 系）
 // ---------------------------------------------------------------------------
 const scripts = pkg.scripts || {}

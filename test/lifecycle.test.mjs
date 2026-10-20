@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLifecycleStore, DAY_MS } from '../src/lifecycle.js'
@@ -134,6 +134,43 @@ test('pinned 技能永不被标 stale 或归档', () => {
   assert.equal(counts.markedStale, 0)
   assert.equal(counts.archived, 0)
   assert.ok(existsSync(join(root, 'alpha-skill', 'SKILL.md')))
+})
+
+test('归档后目录被放回（git checkout 恢复）→ syncWith 复活为 active，且不再虚报够格归档', () => {
+  const { home, root, store } = fixture()
+  addSkill(root, 'alpha-skill')
+  store.syncWith(root)
+  const state = store.snapshot()
+  state.skills['alpha-skill'].lastUsedAt = Date.now() - 200 * DAY_MS
+  store.__replaceForTest(state)
+  const first = store.transitions({
+    staleDays: 30, archiveDays: 90, archiveEnabled: true,
+    archiveFn: (n) => store.archive(n, root)
+  })
+  assert.equal(first.archived, 1)
+  assert.equal(store.snapshot().skills['alpha-skill'].state, 'archived')
+
+  // 归档后：目录已不在技能库 → transitions() 不得再把它算进 wouldArchive
+  // （否则每轮评审都虚报「1 个够格归档」，而归档必然失败）
+  const second = store.transitions({ staleDays: 30, archiveDays: 90, archiveEnabled: true, archiveFn: () => true })
+  assert.equal(second.wouldArchive, 0, '已归档记录必须短路，不得重复计入 wouldArchive')
+  assert.equal(second.archived, 0)
+
+  // 目录重新出现（技能库是 git 工作树，checkout 就能放回来，绕过 restore 工具）
+  renameSync(join(home, 'skill-curator', 'archived', 'alpha-skill'), join(root, 'alpha-skill'))
+  const sync = store.syncWith(root)
+  assert.equal(sync.restored, 1, '目录重现必须被识别为「已恢复」')
+  assert.equal(sync.dropped, 0, '不得把它当「已消失」drop 掉')
+  assert.equal(store.snapshot().skills['alpha-skill'].state, 'active', '状态必须回到 active')
+  assert.equal(store.snapshot().skills['alpha-skill'].archivedAt, null, 'archivedAt 必须清空')
+  assert.equal(store.summary().archived.includes('alpha-skill'), false, 'summary().archived 不得再含它')
+
+  // markUsed 同样要从 archived 复活（与 stale → active 同理）
+  const st = store.snapshot()
+  st.skills['alpha-skill'].state = 'archived'
+  store.__replaceForTest(st)
+  store.markUsed('alpha-skill')
+  assert.equal(store.snapshot().skills['alpha-skill'].state, 'active', 'markUsed 必须把 archived 拉回 active')
 })
 
 test('落盘是原子的，且损坏文件按空表容错（绝不抛）', () => {

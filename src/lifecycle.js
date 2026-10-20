@@ -107,8 +107,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       if (typeof name !== 'string' || !name) return
       const rec = ensure(name, now)
       rec.lastUsedAt = now
-      // 被使用即从 stale 复活（与 dsh-learn 的 reactivated 语义一致）
-      if (rec.state === 'stale') rec.state = 'active'
+      // 被使用即从 stale/archived 复活（archived = 目录已被放回技能库）
+      if (rec.state === 'stale' || rec.state === 'archived') {
+        rec.state = 'active'
+        rec.archivedAt = null
+      }
       if (now - lastFlushAt >= FLUSH_THROTTLE_MS) persist()
     },
 
@@ -116,7 +119,7 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
      * 与磁盘同步：登记新技能、清理已消失的技能。
      * @param {string} root - 技能库根。
      * @param {string[]} [names] - 已知技能名；**省略时自己 readdir**（两种调用形态都必须成立）。
-     * @returns {{seeded: number, dropped: number}}
+     * @returns {{seeded: number, dropped: number, restored: number}}
      */
     syncWith(root, names) {
       let list = names
@@ -133,10 +136,24 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       }
       const seen = new Set(list)
       let seeded = 0
+      let restored = 0
       for (const name of list) {
-        if (!state.skills[name]) {
+        const rec = state.skills[name]
+        if (!rec) {
           ensure(name)
           seeded += 1
+          continue
+        }
+        // 目录重新出现而状态仍是 archived = 已被恢复（技能库是 git 工作树，
+        // `git checkout` 就能把归档目录放回来，绕过 restore 工具）。
+        // 不重置的话：transitions() 只按 ageDays 判定，而 archived 记录既不会
+        // 被 stale/active 分支改回（两分支都要求 state 恰好匹配），也不会被
+        // dropped 清掉（archived 有豁免）→ 状态永久卡在 archived。
+        if (rec.state === 'archived') {
+          rec.state = 'active'
+          rec.archivedAt = null
+          rec.lastUsedAt = Date.now()
+          restored += 1
         }
       }
       let dropped = 0
@@ -146,8 +163,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
           dropped += 1
         }
       }
-      if (seeded > 0 || dropped > 0) persist()
-      return { seeded, dropped }
+      if (seeded > 0 || dropped > 0 || restored > 0) persist()
+      return { seeded, dropped, restored }
     },
 
     /**
@@ -172,6 +189,10 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       for (const [name, rec] of Object.entries(state.skills)) {
         counts.checked += 1
         if (rec.pinned) continue
+        // 已归档记录短路：目录已不在技能库里，既不该再判 stale，也不该再计
+        // wouldArchive。少了这条，归档后每轮评审都报「1 个够格归档」而归档必然
+        // 失败（目录不在）→ 永久虚报。
+        if (rec.state === 'archived') continue
         const anchor = rec.lastUsedAt ?? rec.firstSeenAt
         const ageDays = (now - anchor) / DAY_MS
         const isStale = ageDays > stale

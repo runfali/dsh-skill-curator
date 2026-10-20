@@ -1178,6 +1178,17 @@ test('excludedSkills 保护名单同样拦截**自动**归档（工具层之外�
     false,
     '保护名单成员绝不能出现在归档目录'
   )
+  // 保护名单成员必须仍在**状态表**里。这是最易走偏的修法：把 `names` 过一道
+  // `.filter((k) => !excluded.includes(k.name))`（"既然保护名单，就别让它进 syncWith"）
+  // 会让 syncWith 把该记录当"已消失"删掉 → 下一轮以 neverUsed 重新 seed →
+  // lastUsedAt 归零 → 永久不 stale。磁盘断言看不出这一点（文件确实还在）。
+  const snap = t.lifecycle.snapshot().skills
+  assert.ok(
+    snap['keep-me'],
+    '保护名单成员必须仍在状态表里（被 syncWith 删掉 → 重新 seed → lastUsedAt 归零 → 永久不 stale）'
+  )
+  assert.equal(snap['keep-me'].lastUsedAt, old, '且 lastUsedAt 不得被重置（归零 = 永久不 stale）')
+  assert.equal(record.lifecycle.checked, 2, '两个技能都必须纳入本轮判定（保护名单不是"别看见它"）')
   // 非保护成员：对照——开关真的开了、路径真的通（否则上面的断言可能是「整个归档没跑」的假绿）
   assert.ok(
     archivedNames().includes('free-me'),
