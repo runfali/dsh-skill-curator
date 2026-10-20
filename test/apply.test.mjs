@@ -29,6 +29,7 @@ const { apply, name } = mod
 const reviewLog = mod.reviewLog
 import { Config } from '../src/settings.js'
 import { TOOLS_READY_SERVICE } from '../src/skill-tools.js'
+import { createLifecycleStore } from '../src/lifecycle.js'
 
 // 0.1.7 起设置值不再经 settings 服务读回：apply 收到的 config 里，可热编辑字段
 // 是 {get()} 活引用（宿主 _commitVolatile 原地写入），普通字段是裸值。
@@ -65,6 +66,11 @@ function makeCtx(config = {}) {
   // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
   const backupRoot = mkdtempSync(join(tmpdir(), 'sc-apply-backup-'))
+  // 隔离：lifecycle store 的默认路径是 <DSH_HOME>/skill-curator/lifecycle.json，
+  // 而 DSH_HOME 缺省指向**真实** ~/.dsh（Task 2 踩过：夹具没隔离 DSH_HOME，
+  // 真写进了用户目录）。这里给每个测试一个临时 home，applyIn 会把它显式
+  // 传给 createLifecycleStore（file + archiveRoot 都落在临时 home 内）。
+  const home = mkdtempSync(join(tmpdir(), 'sc-apply-home-'))
 
   const ctx = {
     fiber: { state: 0 },
@@ -148,7 +154,7 @@ function makeCtx(config = {}) {
     },
     __setWebServerReady(v) { webServerReady = v },
     __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, skillsRoot, backupRoot }
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, skillsRoot, backupRoot, home }
   }
   return ctx
 }
@@ -185,7 +191,21 @@ function applyIn(env, config = {}) {
   const { __webServerReady, __agentsReady, __agentsList, ...real } = config
   env.__setWebServerReady(__webServerReady === true)
   env.__setAgentsReady(__agentsReady === true, __agentsList)
-  return apply(env, { skillsRoot: env.__test.skillsRoot, backupRoot: env.__test.backupRoot, ...real })
+  // 显式注入测试用 lifecycle store：file 与 archiveRoot 都落在本测试的临时
+  // home 内。不走 DSH_HOME 环境变量——apply.test.mjs 是独立进程，但同进程里
+  // 其他用例（history-store 等）也读 DSH_HOME，改环境变量会串味；
+  // 显式传参是唯一不会误写真实 ~/.dsh/skill-curator 的形态。
+  const life = createLifecycleStore({
+    file: join(env.__test.home, 'skill-curator', 'lifecycle.json'),
+    archiveRoot: join(env.__test.home, 'skill-curator', 'archived')
+  })
+  env.__test.lifecycle = life
+  return apply(env, {
+    skillsRoot: env.__test.skillsRoot,
+    backupRoot: env.__test.backupRoot,
+    __lifecycle: life,
+    ...real
+  })
 }
 
 test('apply registers full chain (tools/listener/command/route)', async () => {
@@ -684,4 +704,47 @@ test('stale agent disposed must not drop inherited counter (P2-2 race)', async (
   await cb2[0]({ turn: 3 })
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(started.length, 1, 'stale disposed must not reset inherited counter')
+})
+
+test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理不计数）', async () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const cbs = t.listeners.get('tools/pre-execute')
+  assert.ok(cbs && cbs.length === 1, '必须注册一个 tools/pre-execute 监听')
+
+  // 模拟宿主 waterfall 签名 (exec, next)
+  const next = async () => ({ kind: 'allow' })
+  await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
+  const life = env.__test.lifecycle
+  assert.ok(life, 'apply 必须暴露 lifecycle store 供状态接口复用')
+  assert.ok(life.snapshot().skills['alpha-skill'].lastUsedAt > 0, 'skill 调用必须记 lastUsedAt')
+
+  // 其他工具不动状态。**必须用一个自己也吃 `name` 参数的兄弟工具**：
+  // skill-library-* 全都收 name，若只判 `typeof arguments.name === 'string'`
+  // 而不判 `exec.name === 'skill'`，读一个技能就会把它记成「被使用」。
+  await cbs[0]({ name: 'skill-library-read', arguments: { name: 'not-used-skill' }, agent: { session: { header: {} } } }, next)
+  assert.equal(life.snapshot().skills['not-used-skill'], undefined, '非 skill 工具不记（哪怕它也有 name 参数）')
+  await cbs[0]({ name: 'bash', arguments: { command: 'ls' }, agent: { session: { header: {} } } }, next)
+  assert.equal(life.snapshot().skills['bash'], undefined, '非 skill 工具不记')
+
+  // 子代理调用不计数（评审子代理读技能不是「使用」）
+  await cbs[0]({ name: 'skill', arguments: { name: 'beta-skill' }, agent: { session: { header: { origin: 'subagent' } } } }, next)
+  assert.equal(life.snapshot().skills['beta-skill'], undefined, '子代理不计数')
+
+  // 委派深度 > 0 同样不计数（origin 缺失时靠深度兜底）
+  await cbs[0]({ name: 'skill', arguments: { name: 'gamma-skill' }, agent: { session: { header: { delegationDepth: 1 } } } }, next)
+  assert.equal(life.snapshot().skills['gamma-skill'], undefined, '委派深度 > 0 不计数')
+
+  // 必须放行（waterfall 语义：返回 next() 的结果）
+  const decision = await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
+  assert.deepEqual(decision, { kind: 'allow' }, 'pre-execute 必须放行，不能拦工具')
+
+  // 观测自身抛错也只 warn：绝不把工具拦掉、绝不炸主线
+  const boom = async () => ({ kind: 'allow' })
+  const original = life.markUsed
+  life.markUsed = () => { throw new Error('boom') }
+  const afterThrow = await cbs[0]({ name: 'skill', arguments: { name: 'delta-skill' }, agent: { session: { header: {} } } }, boom)
+  assert.deepEqual(afterThrow, { kind: 'allow' }, '观测异常后仍必须放行')
+  life.markUsed = original
 })

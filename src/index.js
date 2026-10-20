@@ -32,6 +32,7 @@ import { buildReviewPrompt } from './review-prompt.js'
 import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
 import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, runGit } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
+import { createLifecycleStore } from './lifecycle.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
 export const name = 'skill-curator'
@@ -139,6 +140,39 @@ export function apply(ctx, config = {}) {
       return { committed: false, reason: String((error && error.message) || error) }
     }
   }
+
+  // ---------------------------------------------------------------------
+  // 使用观测：skill 工具被调用 = 该技能「被使用」
+  // ---------------------------------------------------------------------
+  // 为什么用 tools/pre-execute 而不是 ctx.tools.guard()：
+  //   guard 的语义是「同步拒绝」（返回字符串即拦下工具），而观测是纯副作用，
+  //   不该占用拒绝通道；pre-execute 是官方扩展点（宿主先例：dsh-tool-jobs:235、
+  //   dsh-experimental-auto-review:462、dsh-hooks-claude-code:248），签名 (exec, next)。
+  // 为什么必须 return next()：这是 waterfall，不返回等于把工具拦掉。
+  //
+  // 这一步修的是 dsh-learn 的核心缺陷：它的 last_used_at 只能由 SKILL.md 的 mtime
+  // 兜底（markUsed 是死代码），于是「30 天未用」实际是「30 天没改过文件」。
+  //
+  // 定义位置必须在工具注册循环之前：Task 4 会把 lifecycle 传给
+  // createSkillToolDefinitions(() => settings.spec(), () => lifecycle)，
+  // 定义在 ctx.provide 之后会让那个引用落在 TDZ（ReferenceError）。
+  const lifecycle = config.__lifecycle || createLifecycleStore({
+    file: config.lifecyclePath || undefined,
+    log: (level, message) => (level === 'warn' ? ctx.logger.warn(message) : ctx.logger.info(message))
+  })
+  ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => {
+    try {
+      if (exec && exec.name === 'skill') {
+        const header = exec.agent && exec.agent.session && exec.agent.session.header
+        const isSubagent = header && (header.origin === 'subagent' || (typeof header.delegationDepth === 'number' && header.delegationDepth > 0))
+        const name = exec.arguments && exec.arguments.name
+        if (!isSubagent && typeof name === 'string') lifecycle.markUsed(name)
+      }
+    } catch (error) {
+      ctx.logger.warn('skill-curator: usage observation failed: %s', (error && error.message) || error)
+    }
+    return next()
+  }), 'skill-curator: usage observation')
 
   // ---------------------------------------------------------------------
   // 工具注册：skill-library-*（全局注册；语义无害，写入受 excludedSkills 与「先读后改」约束）
