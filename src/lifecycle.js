@@ -165,7 +165,13 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
         if (rec.state === 'archived') {
           rec.state = 'active'
           rec.archivedAt = null
-          rec.lastUsedAt = Date.now()
+          // ⚠️ **不要**在这里写 lastUsedAt = now。
+          // 「目录重现」只证明它回到了技能库，**不代表它被使用过** ——
+          // 面板/判定看的是「最后一次被 skill 工具加载」，不是「最后一次被恢复」。
+          // 写成 now 会把一个 200 天没用过的技能刷成「刚刚用过」，
+          // 于是它永远不进 stale、永远不进归档候选（2026-10-20 真机踩到：
+          // 对账复活两条 200 天前的实验技能后，lastUsedAt 变成对账时刻，
+          // wouldArchive 立刻空了）。真正被加载时 markUsed() 会自己写入。
           restored += 1
         }
       }

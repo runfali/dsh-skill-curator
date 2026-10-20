@@ -176,7 +176,8 @@ test('归档后目录被放回（git checkout 恢复）→ syncWith 复活为 ac
   addSkill(root, 'alpha-skill')
   store.syncWith(root)
   const state = store.snapshot()
-  state.skills['alpha-skill'].lastUsedAt = Date.now() - 200 * DAY_MS
+  const oldUse = Date.now() - 200 * DAY_MS
+  state.skills['alpha-skill'].lastUsedAt = oldUse
   store.__replaceForTest(state)
   const first = store.transitions({
     staleDays: 30, archiveDays: 90, archiveEnabled: true,
@@ -199,6 +200,19 @@ test('归档后目录被放回（git checkout 恢复）→ syncWith 复活为 ac
   assert.equal(store.snapshot().skills['alpha-skill'].state, 'active', '状态必须回到 active')
   assert.equal(store.snapshot().skills['alpha-skill'].archivedAt, null, 'archivedAt 必须清空')
   assert.equal(store.summary().archived.includes('alpha-skill'), false, 'summary().archived 不得再含它')
+  // ⚠️ 关键判据（2026-10-20 真机踩到）：目录重现 **不等于** 被使用过。
+  // 复活时若写 lastUsedAt = now，一个 200 天没用过的技能会被刷成「刚刚用过」，
+  // 于是永远不进 stale、永远不进归档候选 —— 直接毁掉「按真实使用计时」这条核心。
+  assert.equal(
+    store.snapshot().skills['alpha-skill'].lastUsedAt,
+    oldUse,
+    '复活不得改写 lastUsedAt（恢复 ≠ 使用）'
+  )
+  assert.deepEqual(
+    store.summary({ archiveDays: 90 }).wouldArchive,
+    ['alpha-skill'],
+    '复活后仍须是归档候选（它的上次使用时间没变）'
+  )
 
   // markUsed 同样要从 archived 复活（与 stale → active 同理）
   const st = store.snapshot()
