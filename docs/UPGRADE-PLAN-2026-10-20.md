@@ -187,6 +187,10 @@ function fixture() {
   const home = mkdtempSync(join(tmpdir(), 'sc-life-'))
   const root = join(home, 'skills')
   const file = join(home, 'skill-curator', 'lifecycle.json')
+  // 必须把 DSH_HOME 指向临时 home：否则 archiveRoot 会落到真实的
+  // ~/.dsh/skill-curator/archived，测试就把垃圾写进用户真技能库旁边
+  //（执行期实测踩到，已清理）。
+  process.env.DSH_HOME = home
   mkdirSync(root, { recursive: true })
   return { home, root, file, store: createLifecycleStore({ file }) }
 }
@@ -265,7 +269,13 @@ test('archiveEnabled=true 时才真的移动目录，且可 restore', () => {
   const state = store.snapshot()
   state.skills['alpha-skill'].lastUsedAt = Date.now() - 200 * DAY_MS
   store.__replaceForTest(state)
-  const counts = store.transitions({ staleDays: 30, archiveDays: 90, archiveEnabled: true })
+  // archiveFn 由调用方注入（保持「判定」与「执行」解耦），这里显式接上真实归档动作。
+  const counts = store.transitions({
+    staleDays: 30,
+    archiveDays: 90,
+    archiveEnabled: true,
+    archiveFn: (n) => store.archive(n, root)
+  })
   assert.equal(counts.archived, 1)
   const archived = join(home, 'skill-curator', 'archived', 'alpha-skill', 'SKILL.md')
   assert.ok(existsSync(archived), '归档到技能库之外')
@@ -298,6 +308,17 @@ test('落盘是原子的，且损坏文件按空表容错（绝不抛）', () =>
   writeFileSync(file, '{ not json')
   const reopened = createLifecycleStore({ file })
   assert.deepEqual(reopened.snapshot().skills, {}, '损坏 → 空表，不抛')
+})
+
+test('归档目标已存在时返回 false 且绝不覆盖（避开 dsh-learn 的 rmSync 缺陷）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'alpha-skill')
+  store.syncWith(root)
+  assert.equal(store.archive('alpha-skill', root), true)
+  // 再次造同名技能并尝试归档：目标已存在 → 必须返回 false，且旧归档完好
+  addSkill(root, 'alpha-skill')
+  assert.equal(store.archive('alpha-skill', root), false, '目标已存在时不得覆盖')
+  assert.ok(existsSync(join(store.archiveRoot, 'alpha-skill', 'SKILL.md')), '旧归档必须还在')
 })
 
 test('markUsed 节流：60s 内多次调用只落盘一次', () => {
