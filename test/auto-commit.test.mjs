@@ -25,13 +25,17 @@ function host(skillsRoot) {
       const child = { effect: (fn) => fn() }
       if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
       if (list.includes('settings')) child.settings = ctx.settings
+      // commands：/skill-refine 走等待式 ctx.inject(['commands'])（不再是一次性
+      // ctx.get），桩必须在这里提供，否则命令注册不到。
+      if (list.includes('commands')) child.commands = { register(def) { seen.__cmd = def; return () => {} } }
       cb(child)
       return () => {}
     },
     settings: { configure: (p) => { seen.presentations.push(p); return () => {} } },
     tools: { register: (d) => seen.tools.push(d) },
     provide: (name, value) => { seen.provided.push({ name, value }); return () => {} },
-    get: (k) => (k === 'commands' ? { register: () => () => {} } : undefined)
+    // commands 不再经 ctx.get（一次性读会在服务未就绪时静默跳过注册）
+    get: () => undefined
   }
   mkdirSync(skillsRoot, { recursive: true })
   // lifecycle 隔离：不传 lifecyclePath 时 store 默认指向真实 ~/.dsh/skill-curator/lifecycle.json，
@@ -94,13 +98,14 @@ test('review completion auto-commits the skill library (real git, real plugin en
       const child = { effect: (fn) => fn() }
       if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
       if (list.includes('settings')) child.settings = ctx2.settings
+      if (list.includes('commands')) child.commands = { register(def) { seen.__cmd = def; return () => {} } }
       cb(child)
       return () => {}
     },
     settings: { configure: () => () => {} },
     tools: { register: (d) => seen.tools.push(d) },
     provide: (name, value) => { seen.provided.push({ name, value }); return () => {} },
-    get: (k) => (k === 'subagents' ? subagents : k === 'commands' ? { register: (d) => { seen.__cmd = d; return () => {} } } : undefined)
+    get: (k) => (k === 'subagents' ? subagents : undefined)
   }
   mod.apply(ctx2, {
     skillsRoot: skills,

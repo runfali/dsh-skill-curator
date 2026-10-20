@@ -35,6 +35,9 @@ function makeHost() {
       const child = { effect: (fn) => fn() }
       if (list.includes('webServer')) child.webServer = { register(route) { seen.routes.push(route); return () => {} } }
       if (list.includes('settings')) child.settings = ctx.settings
+      // commands：/skill-refine 走等待式 ctx.inject(['commands'])（不再是一次性
+      // ctx.get），桩必须在这里提供，否则命令注册不到。
+      if (list.includes('commands')) child.commands = { register(d) { seen.commands.push(d); return () => {} } }
       cb(child)
       return () => {}
     },
@@ -42,7 +45,7 @@ function makeHost() {
     tools: { register(definition) { seen.tools.push(definition) } },
     provide(name, value) { seen.provided.push({ name, value }); return () => {} },
     get(key) {
-      if (key === 'commands') return { register(d) { seen.commands.push(d); return () => {} } }
+      // commands 不再经 ctx.get（一次性读会在服务未就绪时静默跳过注册）
       if (key === 'webServer') return { register(r) { seen.routes.push(r); return () => {} } }
       return undefined
     }

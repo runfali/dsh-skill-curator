@@ -74,6 +74,13 @@ function makeCtx(config = {}) {
   // 或 applyIn(env, {__skillsReady:true})（与 webServer/agents 同形）。
   let skillsReady = config.__skillsReady === true
   const skillsReadyGetter = () => skillsReady
+  // commands 服务就绪开关：由 dsh-base 的 dsh-commands 行提供，与本插件 apply
+  // 时序不保证。历史上本插件用一次性 ctx.get('commands') → 服务未就绪即**静默**
+  // 不注册 /skill-refine（零日志）。官方命令插件（dsh-command-goal:10、
+  // dsh-command-compact:9、dsh-command-feedback:66）一律把 commands 放进 inject
+  // 等待就绪。默认**关**，逼出等待式形态。
+  let commandsReady = config.__commandsReady === true
+  const commandsReadyGetter = () => commandsReady
   // 故障注入（I4 守护）：register 抛错 / register 根本不存在。
   // 前者钉住 try/catch（删掉它 apply 会炸主线）；后者钉住 `typeof register !== 'function'`
   // 守卫（删掉它会走 register(...) → TypeError，落到 catch 里报另一种错，必须靠文案区分）。
@@ -121,6 +128,7 @@ function makeCtx(config = {}) {
       const ready = list.every((s) =>
         (s !== 'webServer' || webServerReadyGetter()) &&
         (s !== 'skills' || skillsReadyGetter()) &&
+        (s !== 'commands' || commandsReadyGetter()) &&
         (s !== 'agents' || agentsReadyGetter()))
       if (!ready) return () => {}
       // 注入回调拿到的是**子 ctx**：按请求的服务名挂上对应服务面（真实宿主同形）。
@@ -132,6 +140,11 @@ function makeCtx(config = {}) {
         if (s === 'settings') services_.settings = ctx.settings
         // agents：补注册现存 agent 的唯一通路（真机由 dsh-base 的 agent 行提供）
         if (s === 'agents') services_.agents = { list: () => agentsList }
+        // commands：官方命令插件（dsh-command-goal:10 / -compact:9 / -feedback:66）
+        // 都把 commands 声明在 inject 里等待就绪；本插件历史上用一次性 ctx.get，
+        // 服务未就绪即静默不注册（零日志）。这里必须走 inject 子 ctx 拿服务，
+        // 才能测出「等待式注册」这一形态。
+        if (s === 'commands') services_.commands = { register(def) { commands.push(def); return () => {} } }
         // skills：dsh-skill 的 register(def) → disposer。只登记，不碰真实 DSH_HOME。
         // 返回**唯一哨兵** disposer：只有把它交给 effect 才测得出「卸载时收口」
         // （若实现直接调 register 而不包 effect，注册照样成功、断言照样绿）。
@@ -164,8 +177,9 @@ function makeCtx(config = {}) {
     },
     // 一次性 ctx.get：真机 apply 期常常拿不到 webServer（服务未激活）→ 返回 undefined。
     // 这正是本轮踩中的静默空转形态，桩必须如实模拟。
+    // ⚠️ commands **不再**从这里给：它必须走 inject 等待式（官方三插件同形）。
+    // 若在这里返回桩对象，实现退回 ctx.get('commands') 也会绿 —— 那是假绿。
     get(key) {
-      if (key === 'commands') return { register(def) { commands.push(def); return () => {} } }
       if (key === 'webServer') {
         return webServerReadyGetter() ? { register(route) { routes.push(route); return () => {} } } : undefined
       }
@@ -192,6 +206,7 @@ function makeCtx(config = {}) {
     __setWebServerReady(v) { webServerReady = v },
     __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
     __setSkillsReady(v) { skillsReady = v },
+    __setCommandsReady(v) { commandsReady = v },
     __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, runtimeSkills, skillDisposers, warns, skillsRoot, backupRoot, home }
   }
   return ctx
@@ -264,10 +279,11 @@ async function fireReview(env) {
  * 产生了两条垃圾提交）。这里统一兜底，任何测试都不可能再写真实技能库。
  */
 function applyIn(env, config = {}) {
-  const { __webServerReady, __agentsReady, __agentsList, __skillsReady, ...real } = config
+  const { __webServerReady, __agentsReady, __agentsList, __skillsReady, __commandsReady, ...real } = config
   env.__setWebServerReady(__webServerReady === true)
   env.__setAgentsReady(__agentsReady === true, __agentsList)
   if (__skillsReady !== undefined) env.__setSkillsReady(__skillsReady === true)
+  if (__commandsReady !== undefined) env.__setCommandsReady(__commandsReady === true)
   // 显式注入测试用 lifecycle store：file 与 archiveRoot 都落在本测试的临时
   // home 内。不走 DSH_HOME 环境变量——apply.test.mjs 是独立进程，但同进程里
   // 其他用例（history-store 等）也读 DSH_HOME，改环境变量会串味；
@@ -287,7 +303,7 @@ function applyIn(env, config = {}) {
 
 test('apply registers full chain (tools/listener/command/route)', async () => {
   const env = makeCtx({})
-  applyIn(env, { __webServerReady: true })
+  applyIn(env, { __webServerReady: true, __commandsReady: true })
   const t = env.__test
   assert.equal(t.tools.length, 11, 'eleven skill-library tools registered')
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
@@ -298,6 +314,33 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
+})
+
+// ---------------------------------------------------------------------------
+// commands 必须走 inject 等待式（官方三插件同形），不能一次性 ctx.get
+// ---------------------------------------------------------------------------
+// 真机形态：commands 由 dsh-base 的 dsh-commands 行提供，与本插件 apply 时序
+// **不保证**。历史上用 `const commands = ctx.get('commands'); if (commands !== undefined)`
+// → 服务未就绪时**静默不注册** /skill-refine，零日志、零报错（与本仓修过的
+// webServer / agents / skills 三条「第七路盲区」同源）。
+// 官方命令插件一律把 commands 放进 inject：dsh-command-goal:10、
+// dsh-command-compact:9、dsh-command-feedback:66。
+test('commands 未就绪时不注册 /skill-refine（不得静默假装注册）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true }) // commandsReady 默认 false
+  assert.equal(env.__test.commands.length, 0, '未就绪 → 不注册（由 inject 等待，而非 ctx.get 空转）')
+})
+
+test('commands 就绪后才注册 /skill-refine（等待式注入生效）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  assert.equal(env.__test.commands.length, 0, '先确认未就绪时不注册')
+  env.__setCommandsReady(true)
+  // 真实 cordis：服务就绪会唤醒等待中的 inject fiber 重跑回调。
+  // 夹具按同形语义重放一次 apply（幂等：installAgentTrack / 工具注册均可重入）。
+  applyIn(env, { __webServerReady: true, __commandsReady: true })
+  assert.equal(env.__test.commands.length, 1, '就绪后注册')
+  assert.equal(env.__test.commands[0].name, 'skill-refine')
 })
 
 test('apply 必须在注册完 11 个工具**之后**才发布就绪标记（顺序反了 = preset 守卫失效）', async () => {
@@ -672,7 +715,8 @@ test('/skill-refine command schedules with focus', async () => {
   const started = []
   const env = makeCtx({})
   env.get = (key) => {
-    if (key === 'commands') return { register(def) { env.__cmd = def; return () => {} } }
+    // commands 不再经 ctx.get 提供（必须走 inject 等待式，见本文件开头两条
+    // commands 用例）。这里只桩 subagents。
     if (key === 'subagents') {
       return {
         getProvider() { return undefined },
@@ -685,8 +729,8 @@ test('/skill-refine command schedules with focus', async () => {
     }
     return undefined
   }
-  applyIn(env, {})
-  const cmd = env.__cmd
+  applyIn(env, { __commandsReady: true })
+  const cmd = env.__test.commands[0]
   const agent = makeAgent(env)
   await emitOn(env.__test.listeners, 'agent/created', { agent })
   const out = await cmd.handler({ agent, rawInput: ' 重点提炼部署流程 ', signal: new AbortController().signal })

@@ -439,24 +439,36 @@ export function apply(ctx, config = {}) {
   // ---------------------------------------------------------------------
   // 手动命令：/skill-refine [focus]
   // ---------------------------------------------------------------------
-  const commands = ctx.get('commands')
-  if (commands !== undefined) {
-    commands.register({
-      name: 'skill-refine',
-      description: '立即对本次会话发起一次后台技能评审（可附加关注点：/skill-refine <focus>）',
-      handler: ({ agent, rawInput, signal }) => {
-        try {
-          scheduleReview(agent, (rawInput || '').trim())
-          return {
-            kind: 'success',
-            text: '🎓 技能评审已在后台启动，完成后结果会出现在宿主日志与设置卡片。'
+  // ⚠️ 必须走等待式 ctx.inject(['commands'])，**不能**用一次性 ctx.get('commands')：
+  //   commands 由 dsh-base 的 dsh-commands 行提供（bundle 0），与本插件 apply
+  //   时序不保证。一次性读在服务未就绪时拿到 undefined → `if (undefined !== undefined)`
+  //   直接跳过 → **静默不注册 /skill-refine**，零日志、零报错（与本仓修过的
+  //   webServer / agents / skills 三条「第七路盲区」完全同源）。
+  //   官方命令插件一律把 commands 放进 inject 等待就绪：
+  //   dsh-command-goal:10、dsh-command-compact:9、dsh-command-feedback:66。
+  //   注册成功打一行 info：否则「命令没出现」与「命令注册失败」在真机上无法区分。
+  ctx.inject(['commands'], (commandCtx) => {
+    try {
+      commandCtx.commands.register({
+        name: 'skill-refine',
+        description: '立即对本次会话发起一次后台技能评审（可附加关注点：/skill-refine <focus>）',
+        handler: ({ agent, rawInput, signal }) => {
+          try {
+            scheduleReview(agent, (rawInput || '').trim())
+            return {
+              kind: 'success',
+              text: '🎓 技能评审已在后台启动，完成后结果会出现在宿主日志与设置卡片。'
+            }
+          } catch (error) {
+            return { kind: 'error', text: `技能评审启动失败：${(error && error.message) || error}` }
           }
-        } catch (error) {
-          return { kind: 'error', text: `技能评审启动失败：${(error && error.message) || error}` }
         }
-      }
-    })
-  }
+      })
+      ctx.logger.info('skill-curator: /skill-refine command registered')
+    } catch (error) {
+      ctx.logger.warn('skill-curator: /skill-refine registration failed: %s', (error && error.message) || error)
+    }
+  })
 
   // ---------------------------------------------------------------------
   // 状态接口：GET /api/skill-curator/status（设置卡片轮询展示）
