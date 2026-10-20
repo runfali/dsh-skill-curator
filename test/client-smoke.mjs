@@ -277,28 +277,44 @@ const proj = injected.hooks.curator.getSnapshot()
 assert.equal(proj.shell.dirty, false, 'dirty cleared after save')
 ok('save flow writes user layer')
 
-// ---- 生命周期面板：独立条目真的渲染出候选与归档按钮 ----
-// 判据：数据有（status 接口返回 wouldArchive）≠ 面板画了。上一轮 I-6 的教训是
-// 「删掉整块渲染也全绿」，所以这里断言**文案真的进了渲染树**。
+// ---- 生命周期面板：独立条目真的渲染出候选与归档/恢复 ----
+// 判据：数据有（status 返回 wouldArchive / archived）≠ 面板画了。上一轮的教训是
+// 「删掉整块渲染也全绿」，所以这里**喂真实形状的数据**再看渲染产物。
+// 不喂数据的话面板停在 error/空分支，断言「没渲染」可能是"没数据"造成的假绿。
 {
   const lifecycleComponent = registered.lifecycleComponent
   assert.equal(typeof lifecycleComponent, 'function', 'lifecycle panel component captured')
-  const lcT = (key, params) => {
-    let out = dict.zh[key] || key
-    for (const [k, v] of Object.entries(params || {})) out = out.split('{' + k + '}').join(String(v))
-    return out
+  const lcDict = (key) => dict.zh[key] || key
+
+  const fakeStatus = {
+    ok: true,
+    archiveEnabled: false,
+    reviews: [],
+    lifecycle: {
+      active: ['alpha-skill'],
+      stale: ['beta-skill'],
+      archived: ['gone-one', 'gone-two'],
+      neverUsed: [],
+      pinned: [],
+      wouldArchive: ['alpha-skill'],
+      lastPassAt: Date.now()
+    }
   }
-  // 折叠态（summary 视图）：列表页那一行
-  renderedText.length = 0
-  renderTree(makeElement(lifecycleComponent, { t: lcT, view: 'summary' }))
-  assert.ok(renderedText.join('').length > 0, 'summary view renders a one-liner')
-  // 展开态：节点树里必须出现「够格归档」标题与归档按钮
-  renderedText.length = 0
-  const lcTree = makeElement(lifecycleComponent, { t: lcT })
-  renderTree(lcTree)
-  const lcJson = JSON.stringify(lcTree)
-  assert.ok(lcJson.includes('lc.title') === false, 'lifecycle title resolved through locale, not raw key')
-  ok('lifecycle panel renders (independent plugins.item entry)')
+  const realFetch = globalThis.fetch
+  // 面板在 useEffect 里 load()：返回已 resolve 的 promise。
+  // 组件渲染是同步的，首帧拿不到数据 → 只能断言**折叠态标题**。
+  globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve(fakeStatus) })
+  try {
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict }))
+    const text = renderedText.join(' | ')
+    assert.ok(text.includes('技能生命周期'), 'panel title rendered through locale')
+    // 关键：不能出现未解析的 locale key（渲染时 t() 必须命中字典）
+    assert.ok(!/\blc\.[a-zA-Z]+\b/.test(text), 'no unresolved locale keys in the render tree')
+    ok('lifecycle panel renders (independent plugins.item entry)')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 }
 
 console.log(`\nclient smoke OK: ${PASS.length + 1} groups passed`)

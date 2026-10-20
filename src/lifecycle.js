@@ -272,6 +272,7 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       const src = join(archivedRoot, name)
       const dst = join(root, name)
       if (!existsSync(join(src, 'SKILL.md'))) return false
+      // 技能库已有同名 → 拒绝（绝不覆盖，与 archive() 的「不覆盖旧归档」对称）
       if (existsSync(dst)) return false
       try {
         mkdirSync(dirname(dst), { recursive: true })
@@ -283,7 +284,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       const rec = ensure(name)
       rec.state = 'active'
       rec.archivedAt = null
-      rec.lastUsedAt = Date.now()
+      // ⚠️ **不要**写 lastUsedAt = now。恢复只证明它回到技能库，**不代表被使用过**。
+      // 写成 now 会把一个 200 天没用过的技能刷成「刚刚用过」→ 永远不进 stale、
+      // 永远不进归档候选（2026-10-20 真机在 syncWith 的复活分支踩过一次，
+      // 这里是同一 bug 的第二处；两处都已由测试钉死）。
+      rec.origin = 'disk'
       persist()
       return true
     },

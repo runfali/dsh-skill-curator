@@ -311,9 +311,10 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   assert.equal(t.commands[0].name, 'skill-refine')
   // 两条路由：GET status（只读轮询）+ POST archive（UI 一键归档）。
   // 必须分开：归档是破坏性动作，不能让「刷新面板」顺手把它做了。
-  assert.equal(t.routes.length, 2, 'status + archive routes registered')
+  assert.equal(t.routes.length, 3, 'status + archive + restore routes registered')
   assert.equal(t.routes[0].path, '/api/skill-curator/status')
   assert.equal(t.routes[1].path, '/api/skill-curator/archive')
+  assert.equal(t.routes[2].path, '/api/skill-curator/restore')
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
@@ -419,9 +420,10 @@ test('webServer 未就绪时不静默丢路由；就绪后必须注册（第七�
   // 服务就绪（等价于宿主把 webServer 挂上）→ inject 回调触发 → 路由注册
   const env2 = makeCtx({})
   applyIn(env2, { __webServerReady: true })
-  assert.equal(env2.__test.routes.length, 2, 'ready → both routes registered')
+  assert.equal(env2.__test.routes.length, 3, 'ready → all three routes registered')
   assert.equal(env2.__test.routes[0].path, '/api/skill-curator/status')
   assert.equal(env2.__test.routes[1].path, '/api/skill-curator/archive')
+  assert.equal(env2.__test.routes[2].path, '/api/skill-curator/restore')
 })
 
 test('tools read live (dereferenced) config: excludedSkills works as a protection list', async () => {
@@ -1385,5 +1387,110 @@ test('excludedSkills 保护名单同样拦截**自动**归档（工具层之外�
     '非保护成员应被归档（证明归档路径确实生效，保护名单断言不是假绿）'
   )
   assert.equal(record.lifecycle.archived, 1, '只归档了 1 个（受保护那个被拦下）')
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/skill-curator/restore —— UI 一键恢复（归档的逆操作）
+// ---------------------------------------------------------------------------
+// 归档是破坏性动作但可逆；「能归档不能恢复」是不对称的产品缺陷。
+// 恢复同样必须走 POST + 同源，且**不得改写 lastUsedAt**（恢复 ≠ 使用）。
+function postRestore(env, body) {
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/restore')
+  const payload = JSON.stringify(body)
+  const chunks = [Buffer.from(payload, 'utf8')]
+  const req = {
+    method: 'POST',
+    headers: { host: '127.0.0.1:7009', 'content-type': 'application/json' },
+    on(event, cb) {
+      if (event === 'data') chunks.forEach((c) => cb(c))
+      if (event === 'end') cb()
+      return req
+    },
+    destroy() {}
+  }
+  return new Promise((resolve) => {
+    const res = { statusCode: 0, writeHead(code) { res.statusCode = code }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler(req, res)
+  })
+}
+
+test('UI 恢复：归档的技能能移回技能库，且 lastUsedAt 不被改写', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const t = env.__test
+  mkdirSync(join(t.skillsRoot, 'restore-me'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'restore-me', 'SKILL.md'), '---\nname: restore-me\ndescription: d\n---\n\n# x\n')
+  t.lifecycle.syncWith(t.skillsRoot, ['restore-me'])
+  const old = Date.now() - 200 * 86400000
+  t.lifecycle.markUsed('restore-me', { now: old })
+  assert.equal(t.lifecycle.archive('restore-me', t.skillsRoot), true, '前置：先归档')
+
+  const out = await postRestore(env, { names: ['restore-me'] })
+
+  assert.equal(out.status, 200)
+  assert.deepEqual(out.body.restored, ['restore-me'])
+  assert.ok(readdirSync(t.skillsRoot).includes('restore-me'), '目录必须回到技能库')
+  assert.equal(existsSync(join(t.lifecycle.archiveRoot, 'restore-me')), false, '归档目录里必须没了')
+  const rec = t.lifecycle.snapshot().skills['restore-me']
+  assert.equal(rec.state, 'active', '状态回到 active')
+  assert.equal(rec.lastUsedAt, old, '恢复不得改写 lastUsedAt（恢复 ≠ 使用）')
+})
+
+test('UI 恢复：未归档 / 未知 / 库内已有同名 一律跳过并说明原因', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const t = env.__test
+  mkdirSync(join(t.skillsRoot, 'already-here'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'already-here', 'SKILL.md'), '---\nname: already-here\ndescription: d\n---\n\n# x\n')
+  t.lifecycle.syncWith(t.skillsRoot, ['already-here'])
+
+  const out = await postRestore(env, { names: ['already-here', 'ghost-skill', 'not-archived'] })
+
+  assert.equal(out.status, 200)
+  assert.deepEqual(out.body.restored, [])
+  const reasons = out.body.skipped.map((s) => s.reason).sort()
+  assert.ok(reasons.every((r) => ['not-archived', 'unknown'].includes(r)), '跳过原因必须是这两种之一')
+})
+
+test('UI 恢复：技能库已有同名时拒绝恢复，绝不覆盖现有技能', async () => {
+  // 与 archive() 的「不覆盖旧归档」对称：恢复也不许覆盖库里已有的同名技能，
+  // 否则一次误点就抹掉一个正在用的技能（renameSync 在 Windows 会直接覆盖）。
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const t = env.__test
+  mkdirSync(join(t.skillsRoot, 'clash'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'clash', 'SKILL.md'), '---\nname: clash\ndescription: current\n---\n\n# 正在用的版本\n')
+  t.lifecycle.syncWith(t.skillsRoot, ['clash'])
+  assert.equal(t.lifecycle.archive('clash', t.skillsRoot), true, '前置：先归档')
+  // 归档后手动在库里放一个同名技能（模拟"用户又建了一个同名"）
+  mkdirSync(join(t.skillsRoot, 'clash'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'clash', 'SKILL.md'), '---\nname: clash\ndescription: newer\n---\n\n# 新版本\n')
+
+  const out = await postRestore(env, { names: ['clash'] })
+
+  assert.equal(out.status, 200)
+  assert.deepEqual(out.body.restored, [], '不得恢复')
+  assert.equal(out.body.failed.length, 1, '必须报失败，而不是静默跳过')
+  const existing = readFileSync(join(t.skillsRoot, 'clash', 'SKILL.md'), 'utf8')
+  assert.ok(existing.includes('新版本'), '库里现有技能绝不能被覆盖')
+  assert.ok(existsSync(join(t.lifecycle.archiveRoot, 'clash', 'SKILL.md')), '归档副本必须还在（可再试）')
+})
+
+test('UI 恢复只接受 POST，且拒绝跨源', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/restore')
+
+  const get = await new Promise((resolve) => {
+    const res = { statusCode: 0, writeHead(c) { res.statusCode = c }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  assert.equal(get.status, 405, 'GET 必须 405')
+
+  const cross = await new Promise((resolve) => {
+    const res = { statusCode: 0, writeHead(c) { res.statusCode = c }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler({ method: 'POST', headers: { host: '127.0.0.1:7009', origin: 'http://evil.example' } }, res)
+  })
+  assert.equal(cross.status, 403, '跨源必须 403')
 })
 

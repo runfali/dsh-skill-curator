@@ -619,10 +619,18 @@ export function apply(ctx, config = {}) {
     //   ① sameOrigin（页面同源才能调）；② 只接受 POST；
     //   ③ excludedSkills 保护名单拒archived；④ 运行时技能拒（不在磁盘，必失败）；
     //   ⑤ 每次最多 50 个（防一次误传整个库）。
-    wsCtx.effect(() => wsCtx.webServer.register({
-      kind: 'exact',
-      path: '/api/skill-curator/archive',
-      handler: async (req, res) => {
+    /**
+     * 批量动作路由的共用骨架（archive / restore 只差中间那一段）。
+     *
+     * 抽出来的理由：两条路由的守卫**必须完全同源**（同源检查、只接受 POST、
+     * 体积上限、批量上限、JSON 解析）。复制两份的话，日后改一处忘另一处，
+     * 就会出现「归档拦了跨源、恢复没拦」这类安全缺口。
+     *
+     * @param {(payload: {names: string[], spec: object}) => Promise<{ok: boolean, [k: string]: any}>} run
+     * @param {string} label - 日志标签（'archive' / 'restore'）
+     */
+    function batchRoute(run, label) {
+      return async (req, res) => {
         const json = (code, payload) => {
           res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify(payload))
@@ -646,43 +654,92 @@ export function apply(ctx, config = {}) {
           }
 
           const spec = settings.spec()
-          const excluded = Array.isArray(spec.excludedSkills) ? spec.excludedSkills.map(String) : []
-          const root = skillsRoot(spec)
-          const archived = []
-          const skipped = []
-          const failed = []
-          for (const name of names) {
-            if (!SKILL_ID.test(name)) {
-              failed.push({ name, error: 'invalid skill name' })
-              continue
-            }
-            if (excluded.includes(name)) {
-              skipped.push({ name, reason: 'protected' })
-              continue
-            }
-            const rec = lifecycle.snapshot().skills[name]
-            if (!rec) {
-              skipped.push({ name, reason: 'unknown' })
-              continue
-            }
-            if (rec.origin === 'runtime') {
-              skipped.push({ name, reason: 'runtime' })
-              continue
-            }
-            if (lifecycle.archive(name, root)) archived.push(name)
-            else failed.push({ name, error: 'archive failed (missing, or archive target already exists)' })
-          }
+          const result = await run({ names, spec })
           ctx.logger.info(
-            'skill-curator: UI archive — archived=%d skipped=%d failed=%d',
-            archived.length,
-            skipped.length,
-            failed.length
+            'skill-curator: UI %s — ok=%d skipped=%d failed=%d',
+            label,
+            (result[`${label}d`] || result.archived || result.restored || []).length,
+            (result.skipped || []).length,
+            (result.failed || []).length
           )
-          return json(200, { ok: true, archived, skipped, failed })
+          return json(200, result)
         } catch (error) {
           return json(500, { ok: false, error: String((error && error.message) || error) })
         }
       }
+    }
+
+    wsCtx.effect(() => wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/api/skill-curator/archive',
+      handler: batchRoute(async ({ names, spec }) => {
+        const excluded = Array.isArray(spec.excludedSkills) ? spec.excludedSkills.map(String) : []
+        const root = skillsRoot(spec)
+        const archived = []
+        const skipped = []
+        const failed = []
+        for (const name of names) {
+          if (!SKILL_ID.test(name)) {
+            failed.push({ name, error: 'invalid skill name' })
+            continue
+          }
+          if (excluded.includes(name)) {
+            skipped.push({ name, reason: 'protected' })
+            continue
+          }
+          const rec = lifecycle.snapshot().skills[name]
+          if (!rec) {
+            skipped.push({ name, reason: 'unknown' })
+            continue
+          }
+          if (rec.origin === 'runtime') {
+            skipped.push({ name, reason: 'runtime' })
+            continue
+          }
+          if (lifecycle.archive(name, root)) archived.push(name)
+          else failed.push({ name, error: 'archive failed (missing, or archive target already exists)' })
+        }
+        return { ok: true, archived, skipped, failed }
+      }, 'archive')
     }), 'skill-curator: archive route')
+
+    // -------------------------------------------------------------------
+    // POST /api/skill-curator/restore —— UI 一键恢复（归档的逆操作）
+    // -------------------------------------------------------------------
+    // 「能归档不能恢复」是不对称的产品缺陷：归档可逆，UI 就该给回去的路。
+    // 守卫与 archive 完全同源（共用 batchRoute）：
+    //   ① 只接受 POST（GET 绝不改磁盘）；② 同源；③ 体积/批量上限。
+    // 额外规则：
+    //   ④ 保护名单成员也允许恢复 —— 保护的是「别删/别改内容」，不是「别救回来」；
+    //   ⑤ 技能库已有同名 → 跳过（绝不覆盖，与 archive 的「不覆盖旧归档」对称）；
+    //   ⑥ **不改 lastUsedAt** —— 恢复 ≠ 使用（否则刚救回来的老技能会被刷成"新鲜"）。
+    wsCtx.effect(() => wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/api/skill-curator/restore',
+      handler: batchRoute(async ({ names, spec }) => {
+        const root = skillsRoot(spec)
+        const restored = []
+        const skipped = []
+        const failed = []
+        for (const name of names) {
+          if (!SKILL_ID.test(name)) {
+            failed.push({ name, error: 'invalid skill name' })
+            continue
+          }
+          const rec = lifecycle.snapshot().skills[name]
+          if (!rec) {
+            skipped.push({ name, reason: 'unknown' })
+            continue
+          }
+          if (rec.state !== 'archived') {
+            skipped.push({ name, reason: 'not-archived' })
+            continue
+          }
+          if (lifecycle.restore(name, root)) restored.push(name)
+          else failed.push({ name, error: 'restore failed (archive missing, or a skill with that name already exists)' })
+        }
+        return { ok: true, restored, skipped, failed }
+      }, 'restore')
+    }), 'skill-curator: restore route')
   })
 }
