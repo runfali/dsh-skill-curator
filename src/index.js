@@ -30,7 +30,7 @@ import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
 import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
-import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, listSkills, runGit } from './skill-tools.js'
+import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, listSkills, runGit, SKILL_ID } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 import { createLifecycleStore } from './lifecycle.js'
 import { CURATOR_SKILL } from './runtime-skill.js'
@@ -44,6 +44,35 @@ export const inject = ['settings', 'tools']
 // 0.1.7 起设置命名空间注册已移除：Config 必须从插件模块导出（宿主按 runtime.Config
 // 枚举设置视图），命名空间 = cordis 行 id 'skill-curator'。未导出 = 插件页无配置入口。
 export { Config }
+
+/** 单次 UI 归档批量的上限（防一次误传整个库）。 */
+const MAX_ARCHIVE_BATCH = 50
+/** UI 归档请求体上限（50 个技能名 × ~64 字节，留足余量）。 */
+const MAX_ARCHIVE_BODY_BYTES = 64 * 1024
+
+/**
+ * 读取请求体（带上限）。超限返回 null —— 调用方回 413。
+ * @param {object} req - http.IncomingMessage
+ * @param {number} limit - 字节上限
+ * @returns {Promise<string|null>}
+ */
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        resolve(null)
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
 
 /** 插件版本（读自 package.json，状态接口回显用）。 */
 const VERSION = (() => {
@@ -521,7 +550,9 @@ export function apply(ctx, config = {}) {
             // 所以这里的 broken 是**活体**状态，不是 activate 时的一次性快照。
             // 期望 'ok'；若为 broken 文本，说明 preset 里的 guard 仍在报错。
             reviewPreset: await reviewPresetStatus(ctx),
-            lifecycle: lifecycle.summary(),
+            // 传 archiveDays 才带 wouldArchive —— UI「够格归档」的候选集必须与
+            // transitions() 同源，否则面板会推荐一个 archive() 拒绝做的动作。
+            lifecycle: lifecycle.summary({ archiveDays: settings.spec().archiveDays }),
             archiveEnabled: settings.spec().archiveEnabled,
             reviews: reviewLog.recent().slice(0, 5)
           })
@@ -533,5 +564,80 @@ export function apply(ctx, config = {}) {
         }
       }
     }), 'skill-curator: status route')
+
+    // -------------------------------------------------------------------
+    // POST /api/skill-curator/archive —— UI 一键归档（批量）
+    // -------------------------------------------------------------------
+    // 为什么需要独立路由：归档是**破坏性动作**（移目录），但可 restore，属可逆。
+    // 放 GET /status 里做会让「刷新面板」变成破坏性操作；必须显式 POST。
+    // 守卫（与工具层 / 自动归档路径同源，三处一致）：
+    //   ① sameOrigin（页面同源才能调）；② 只接受 POST；
+    //   ③ excludedSkills 保护名单拒archived；④ 运行时技能拒（不在磁盘，必失败）；
+    //   ⑤ 每次最多 50 个（防一次误传整个库）。
+    wsCtx.effect(() => wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/api/skill-curator/archive',
+      handler: async (req, res) => {
+        const json = (code, payload) => {
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(payload))
+        }
+        try {
+          if (!sameOrigin(req)) return json(403, { ok: false, error: 'forbidden: cross-origin' })
+          if (req.method !== 'POST') return json(405, { ok: false, error: 'method not allowed' })
+
+          const raw = await readBody(req, MAX_ARCHIVE_BODY_BYTES)
+          if (raw === null) return json(413, { ok: false, error: 'body too large' })
+          let parsed
+          try {
+            parsed = JSON.parse(raw || '{}')
+          } catch {
+            return json(400, { ok: false, error: 'invalid JSON body' })
+          }
+          const names = Array.isArray(parsed && parsed.names) ? parsed.names.map(String) : null
+          if (!names || names.length === 0) return json(400, { ok: false, error: 'names[] required' })
+          if (names.length > MAX_ARCHIVE_BATCH) {
+            return json(400, { ok: false, error: `too many names (max ${MAX_ARCHIVE_BATCH})` })
+          }
+
+          const spec = settings.spec()
+          const excluded = Array.isArray(spec.excludedSkills) ? spec.excludedSkills.map(String) : []
+          const root = skillsRoot(spec)
+          const archived = []
+          const skipped = []
+          const failed = []
+          for (const name of names) {
+            if (!SKILL_ID.test(name)) {
+              failed.push({ name, error: 'invalid skill name' })
+              continue
+            }
+            if (excluded.includes(name)) {
+              skipped.push({ name, reason: 'protected' })
+              continue
+            }
+            const rec = lifecycle.snapshot().skills[name]
+            if (!rec) {
+              skipped.push({ name, reason: 'unknown' })
+              continue
+            }
+            if (rec.origin === 'runtime') {
+              skipped.push({ name, reason: 'runtime' })
+              continue
+            }
+            if (lifecycle.archive(name, root)) archived.push(name)
+            else failed.push({ name, error: 'archive failed (missing, or archive target already exists)' })
+          }
+          ctx.logger.info(
+            'skill-curator: UI archive — archived=%d skipped=%d failed=%d',
+            archived.length,
+            skipped.length,
+            failed.length
+          )
+          return json(200, { ok: true, archived, skipped, failed })
+        } catch (error) {
+          return json(500, { ok: false, error: String((error && error.message) || error) })
+        }
+      }
+    }), 'skill-curator: archive route')
   })
 }

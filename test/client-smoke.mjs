@@ -134,13 +134,20 @@ ok('bundle id + apply executed')
 assert.equal(registered.scopeNamespaces[0], 'skill-curator', 'configForms namespace')
 // 注意：bundle 在 vm 沙箱里执行，拿到的数组属于另一个 realm——用 JSON 比内容，不比原型
 assert.equal(JSON.stringify(registered.served), '["skill-curator"]', 'whileServed follows the skill-curator namespace')
-assert.equal(slotRegistrations.length, 1, 'one slot registration')
+assert.equal(slotRegistrations.length, 2, 'two slot registrations: settings card + lifecycle panel')
 const slot = slotRegistrations[0].reg.def
 assert.equal(slot.name, 'plugins.item', 'slot name')
 assert.equal(slot.id, 'skill-curator', 'slot id')
 assert.equal(slot.locale, 'skill-curator', 'slot locale')
 assert.equal(typeof slot.order, 'number', 'slot order (list slot needs a stable sort key)')
 assert.equal(slot.label(), '技能策展（Skill Curator）', 'label is a locale-driven thunk')
+// 第二个条目：独立的生命周期面板（不挤进设置卡，否则卡片越滚越长）
+const lcSlot = slotRegistrations[1].reg.def
+assert.equal(lcSlot.name, 'plugins.item', 'lifecycle slot name')
+assert.equal(lcSlot.id, 'skill-curator-lifecycle', 'lifecycle slot id (distinct from the card)')
+assert.equal(lcSlot.label(), '技能生命周期', 'lifecycle label')
+assert.ok(lcSlot.order > slot.order, 'lifecycle panel sorts after the settings card')
+assert.equal(typeof slotRegistrations[1].reg.component, 'function', 'lifecycle component captured')
 const Component = slotRegistrations[0].reg.component
 assert.equal(typeof Component, 'function', 'component captured')
 const injected = slot.inject()
@@ -213,8 +220,15 @@ const ctxStub2 = {
   slots: {
     inject(name, register) {
       const reg = register()
-      registered.inject2 = reg.def.inject
-      registered.Component2 = reg.component
+      // 现在有两次注册：设置卡（有 inject）与生命周期面板（无 inject）。
+      // 只认第一次带 inject 的作为「设置卡」，第二个单独留档。
+      if (reg.def.inject && registered.inject2 === undefined) {
+        registered.inject2 = reg.def.inject
+        registered.Component2 = reg.component
+      } else if (!reg.def.inject) {
+        registered.lifecycleComponent = reg.component
+        registered.lifecycleDef = reg.def
+      }
       return () => {}
     },
     register(def, component) { return { def, component } }
@@ -262,6 +276,30 @@ assert.equal(user.skillNudgeInterval, 5, 'saved value lands in user layer')
 const proj = injected.hooks.curator.getSnapshot()
 assert.equal(proj.shell.dirty, false, 'dirty cleared after save')
 ok('save flow writes user layer')
+
+// ---- 生命周期面板：独立条目真的渲染出候选与归档按钮 ----
+// 判据：数据有（status 接口返回 wouldArchive）≠ 面板画了。上一轮 I-6 的教训是
+// 「删掉整块渲染也全绿」，所以这里断言**文案真的进了渲染树**。
+{
+  const lifecycleComponent = registered.lifecycleComponent
+  assert.equal(typeof lifecycleComponent, 'function', 'lifecycle panel component captured')
+  const lcT = (key, params) => {
+    let out = dict.zh[key] || key
+    for (const [k, v] of Object.entries(params || {})) out = out.split('{' + k + '}').join(String(v))
+    return out
+  }
+  // 折叠态（summary 视图）：列表页那一行
+  renderedText.length = 0
+  renderTree(makeElement(lifecycleComponent, { t: lcT, view: 'summary' }))
+  assert.ok(renderedText.join('').length > 0, 'summary view renders a one-liner')
+  // 展开态：节点树里必须出现「够格归档」标题与归档按钮
+  renderedText.length = 0
+  const lcTree = makeElement(lifecycleComponent, { t: lcT })
+  renderTree(lcTree)
+  const lcJson = JSON.stringify(lcTree)
+  assert.ok(lcJson.includes('lc.title') === false, 'lifecycle title resolved through locale, not raw key')
+  ok('lifecycle panel renders (independent plugins.item entry)')
+}
 
 console.log(`\nclient smoke OK: ${PASS.length + 1} groups passed`)
 process.exit(0)

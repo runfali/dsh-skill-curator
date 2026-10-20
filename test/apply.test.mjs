@@ -309,8 +309,11 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
   assert.equal(t.commands.length, 1, '/skill-refine registered')
   assert.equal(t.commands[0].name, 'skill-refine')
-  assert.equal(t.routes.length, 1, 'status route registered')
+  // 两条路由：GET status（只读轮询）+ POST archive（UI 一键归档）。
+  // 必须分开：归档是破坏性动作，不能让「刷新面板」顺手把它做了。
+  assert.equal(t.routes.length, 2, 'status + archive routes registered')
   assert.equal(t.routes[0].path, '/api/skill-curator/status')
+  assert.equal(t.routes[1].path, '/api/skill-curator/archive')
   // 0.1.7：设置页展示策略仍要注册（关掉宿主按 schema 自动生成的默认页）
   assert.equal(t.presentations.length, 1, 'settings.configure called once')
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
@@ -416,8 +419,9 @@ test('webServer 未就绪时不静默丢路由；就绪后必须注册（第七�
   // 服务就绪（等价于宿主把 webServer 挂上）→ inject 回调触发 → 路由注册
   const env2 = makeCtx({})
   applyIn(env2, { __webServerReady: true })
-  assert.equal(env2.__test.routes.length, 1, 'ready → route registered')
+  assert.equal(env2.__test.routes.length, 2, 'ready → both routes registered')
   assert.equal(env2.__test.routes[0].path, '/api/skill-curator/status')
+  assert.equal(env2.__test.routes[1].path, '/api/skill-curator/archive')
 })
 
 test('tools read live (dereferenced) config: excludedSkills works as a protection list', async () => {
@@ -1171,6 +1175,81 @@ test('status 接口回显 config 里的 archiveEnabled 与 lifecycle 摘要', as
   })
   assert.equal(offBody.archiveEnabled, false, '未配置 → 默认 false（不能写死 true）')
   assert.ok(offBody.lifecycle, 'status 必须带 lifecycle')
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/skill-curator/archive —— UI 一键归档
+// ---------------------------------------------------------------------------
+// 破坏性动作（移目录，可 restore）必须守三件事：
+//   ① 只在 POST 上做（GET /status 绝不能顺手归档）；
+//   ② 跨源请求拒绝；
+//   ③ 保护名单 / 运行时技能必须跳过（与工具层、自动归档路径同源，三处一致）。
+function postArchive(env, body) {
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/archive')
+  const payload = typeof body === 'string' ? body : JSON.stringify(body)
+  const chunks = [Buffer.from(payload, 'utf8')]
+  const req = {
+    method: 'POST',
+    headers: { host: '127.0.0.1:7009', 'content-type': 'application/json' },
+    on(event, cb) {
+      if (event === 'data') chunks.forEach((c) => cb(c))
+      if (event === 'end') cb()
+      return req
+    },
+    destroy() {}
+  }
+  return new Promise((resolve) => {
+    const res = { statusCode: 0, writeHead(code) { res.statusCode = code }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler(req, res)
+  })
+}
+
+test('UI 归档只接受 POST（GET 不能顺手归档）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/archive')
+  const out = await new Promise((resolve) => {
+    const res = { writeHead(code) { res.statusCode = code }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  assert.equal(out.status, 405, 'GET 必须 405')
+})
+
+test('UI 归档：保护名单与运行时技能被跳过，普通技能真被归档', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true, excludedSkills: ['keep-me'] })
+  const t = env.__test
+  for (const n of ['free-me', 'keep-me']) {
+    mkdirSync(join(t.skillsRoot, n), { recursive: true })
+    writeFileSync(join(t.skillsRoot, n, 'SKILL.md'), `---\nname: ${n}\ndescription: d\n---\n\n# ${n}\n`)
+  }
+  t.lifecycle.syncWith(t.skillsRoot, ['free-me', 'keep-me'])
+  t.lifecycle.markUsed('skill-curator', { now: Date.now() }) // 运行时技能
+
+  const out = await postArchive(env, { names: ['free-me', 'keep-me', 'skill-curator', 'ghost'] })
+
+  assert.equal(out.status, 200)
+  assert.deepEqual(out.body.archived, ['free-me'], '只有普通磁盘技能被归档')
+  const skipped = out.body.skipped.map((s) => s.name).sort()
+  assert.deepEqual(skipped, ['ghost', 'keep-me', 'skill-curator'], '保护名单 / 运行时 / 未知一律跳过')
+  assert.ok(readdirSync(t.skillsRoot).includes('keep-me'), '保护名单成员必须还在技能库里')
+  assert.equal(readdirSync(t.skillsRoot).includes('free-me'), false, '被归档的已移出技能库')
+  assert.ok(existsSync(join(t.lifecycle.archiveRoot, 'free-me', 'SKILL.md')), '归档目录里能找到它（可 restore）')
+})
+
+test('UI 归档：跨源与非数组请求被拒', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/archive')
+
+  const cross = await new Promise((resolve) => {
+    const res = { writeHead(code) { res.statusCode = code }, end(p) { resolve({ status: res.statusCode, body: JSON.parse(p) }) } }
+    route.handler({ method: 'POST', headers: { host: '127.0.0.1:7009', origin: 'http://evil.example' } }, res)
+  })
+  assert.equal(cross.status, 403, '跨源必须 403')
+
+  const bad = await postArchive(env, { names: 'not-an-array' })
+  assert.equal(bad.status, 400, 'names 非数组必须 400')
 })
 
 test('skill-library-lifecycle 的 list 回显 archiveRoot', async () => {

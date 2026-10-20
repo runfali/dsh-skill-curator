@@ -290,8 +290,15 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
       return rec.pinned
     },
 
-    /** 状态摘要（状态面板/工具回显用）。 */
-    summary() {
+    /**
+     * 状态摘要（状态面板 / 工具回显 / UI 面板用）。
+     *
+     * @param {object} [opts]
+     * @param {number} [opts.archiveDays] - 传入则额外算出 `wouldArchive`
+     *   （超过该天数、非 pinned、非 archived、且磁盘上还在的技能）。
+     *   不传则不含该字段 —— 调用方拿不到阈值时宁可不给名单，也不给错的。
+     */
+    summary({ archiveDays } = {}) {
       const out = { active: [], stale: [], archived: [], neverUsed: [] }
       for (const [name, rec] of Object.entries(state.skills)) {
         const bucket = out[rec.state] || out.active
@@ -299,7 +306,28 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
         if (!rec.lastUsedAt) out.neverUsed.push(name)
       }
       for (const key of Object.keys(out)) out[key].sort()
-      return { ...out, lastPassAt: state.lastPassAt, pinned: Object.entries(state.skills).filter(([, r]) => r.pinned).map(([n]) => n).sort() }
+      const result = {
+        ...out,
+        lastPassAt: state.lastPassAt,
+        pinned: Object.entries(state.skills).filter(([, r]) => r.pinned).map(([n]) => n).sort()
+      }
+      const days = Number(archiveDays)
+      if (Number.isFinite(days)) {
+        // 「够格归档」= UI 一键归档的候选集，必须与 transitions() 的判定同源，
+        // 否则面板会推荐一个 archive() 拒绝做的动作。
+        const now = Date.now()
+        result.wouldArchive = Object.entries(state.skills)
+          .filter(([, rec]) => {
+            if (rec.pinned || rec.state === 'archived') return false
+            // 运行时技能不在磁盘上，归档它只会失败 —— 不进候选集。
+            if (rec.origin === 'runtime') return false
+            const anchor = rec.lastUsedAt ?? rec.firstSeenAt
+            return (now - anchor) / DAY_MS > days
+          })
+          .map(([n]) => n)
+          .sort()
+      }
+      return result
     },
 
     /** 立即落盘。 */

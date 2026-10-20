@@ -252,6 +252,52 @@ test('staleDays/archiveDays 非有限数字时抛错，绝不静默空转', () =
   )
 })
 
+// ---------------------------------------------------------------------------
+// summary({archiveDays}) 的 wouldArchive —— UI 一键归档的候选集
+// ---------------------------------------------------------------------------
+// 判据必须与 transitions() 同源：面板推荐归档的技能，archive() 必须真能归档。
+// 否则会出现「点了没反应」——用户看到的是候选，系统拒绝执行。
+test('summary 不传 archiveDays 时不返回 wouldArchive（宁可不给，也不给错的）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'a-skill')
+  store.syncWith(root)
+  const s = store.summary()
+  assert.equal(s.wouldArchive, undefined, '没有阈值就不该猜一个候选集')
+})
+
+test('summary({archiveDays}) 只收「超期 + 非 pinned + 非 archived + 磁盘技能」', () => {
+  const { root, store } = fixture()
+  for (const n of ['old-skill', 'fresh-skill', 'pinned-old']) addSkill(root, n)
+  store.syncWith(root)
+  const old = Date.now() - 200 * DAY_MS
+  store.markUsed('old-skill', { now: old })
+  store.markUsed('fresh-skill', { now: Date.now() })
+  store.markUsed('pinned-old', { now: old })
+  store.setPinned('pinned-old', true)
+  // 运行时技能：不在磁盘上，归档必失败 → 不进候选
+  store.markUsed('skill-curator', { now: old })
+
+  const s = store.summary({ archiveDays: 90 })
+  assert.deepEqual(s.wouldArchive, ['old-skill'], '只有超期、未 pinned、非运行时的磁盘技能')
+})
+
+test('summary 的 wouldArchive 与 transitions 判定同源（推荐的都是真能归档的）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'old-skill')
+  store.syncWith(root)
+  store.markUsed('old-skill', { now: Date.now() - 200 * DAY_MS })
+
+  const recommended = store.summary({ archiveDays: 90 }).wouldArchive
+  const counts = store.transitions({
+    staleDays: 30,
+    archiveDays: 90,
+    archiveEnabled: false,
+    now: Date.now()
+  })
+  assert.deepEqual(recommended, ['old-skill'], '面板推荐')
+  assert.equal(counts.wouldArchive, 1, 'transitions 也认为它够格')
+})
+
 test('markUsed 节流：60s 内多次调用只落盘一次', () => {
   const { file, store } = fixture()
   const t0 = Date.now()
