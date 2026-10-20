@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createCounter } from '../src/counters.js'
 import { buildReviewPrompt, REVIEW_INSTRUCTIONS } from '../src/review-prompt.js'
+import { TOOL_NAMES } from '../src/skill-tools.js'
 
 test('counter fires exactly at interval, then resets', () => {
   const c = createCounter()
@@ -61,4 +62,25 @@ test('review instructions carry the curation guardrails', () => {
 test('review instructions are non-empty and coherent', () => {
   assert.ok(REVIEW_INSTRUCTIONS.length > 500)
   assert.ok(!REVIEW_INSTRUCTIONS.includes('hermes_'), 'no hermes identifiers leaked')
+})
+
+// 工具清单必须与事实一致：子代理的工具面由 TOOL_NAMES 白名单收敛，提示词里
+// 却手写「十件」+ 逐名列举 —— 新增 skill-library-lifecycle 时漏改，评审子代理
+// 就完全不知道归档能力存在（且没有任何测试会报警）。这里钉住集合相等，
+// 让漂移立刻变红，而不是靠人记得同步两处。
+test('review instructions advertise exactly TOOL_NAMES (no missing/extra tool)', () => {
+  const mentioned = new Set(REVIEW_INSTRUCTIONS.match(/skill-library-[a-z][a-z-]*/g) || [])
+  assert.deepEqual(
+    [...mentioned].sort(),
+    [...TOOL_NAMES].sort(),
+    '提示词里点名的工具集合必须与 TOOL_NAMES 逐名相等'
+  )
+  assert.ok(
+    REVIEW_INSTRUCTIONS.includes('skill-library-lifecycle'),
+    'lifecycle 工具必须在提示词里（否则子代理不知道能归档）'
+  )
+  assert.ok(
+    REVIEW_INSTRUCTIONS.includes(String(TOOL_NAMES.length)),
+    `工具件数必须由 TOOL_NAMES.length 生成（当前 ${TOOL_NAMES.length}）`
+  )
 })

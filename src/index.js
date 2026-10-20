@@ -284,13 +284,17 @@ export function apply(ctx, config = {}) {
         // 所以必须包 try/catch：设置项被写坏时只跳过本轮，绝不炸掉整个评审。
         let lifecycleCounts = null
         try {
-          const names = (await listSkills(skillsRoot(s), s.excludedSkills || [])).map((k) => k.name)
+          const excluded = Array.isArray(s.excludedSkills) ? s.excludedSkills.map(String) : []
+          const names = (await listSkills(skillsRoot(s), excluded)).map((k) => k.name)
           lifecycle.syncWith(skillsRoot(s), names)
           lifecycleCounts = lifecycle.transitions({
             staleDays: s.staleDays,
             archiveDays: s.archiveDays,
             archiveEnabled: s.archiveEnabled,
-            archiveFn: (name) => lifecycle.archive(name, skillsRoot(s))
+            // 与工具层 skill-library-lifecycle 同源的保护名单守卫：listSkills() 只把
+            // excluded 用于填 protected 标记、**不过滤**，所以保护名单必须在这里再拦一道，
+            // 否则开关一开，受保护技能照样被移出技能库（2026-10-20 评审发现）。
+            archiveFn: (name) => (excluded.includes(name) ? false : lifecycle.archive(name, skillsRoot(s)))
           })
         } catch (error) {
           ctx.logger.warn('skill-curator: lifecycle pass failed: %s', (error && error.message) || error)

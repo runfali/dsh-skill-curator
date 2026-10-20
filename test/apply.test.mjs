@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -195,6 +195,44 @@ function makeAgent(ctx, { origin, delegationDepth, legacyEvents } = {}) {
 }
 
 const emitOn = (listeners, event, ...args) => Promise.all((listeners.get(event) || []).map((cb) => cb(...args)))
+
+/** 评审子代理桩：立即返回「无需保存」，让评审收尾（含生命周期迁移）跑完。 */
+function reviewMock(env) {
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider() { return undefined },
+        list: () => ['spawn'],
+        async start() {
+          return {
+            result: Promise.resolve({ output: [{ type: 'text', text: '无需保存。' }], stopReason: 'completed' }),
+            dispose: async () => {}
+          }
+        }
+      }
+    }
+    return undefined
+  }
+}
+
+/**
+ * 触发一次完整评审并等它落进 reviewLog。
+ * @returns {Promise<{agent: object, record: object|undefined}>}
+ */
+async function fireReview(env) {
+  const t = env.__test
+  const agent = makeAgent(env)
+  await emitOn(t.listeners, 'agent/created', { agent })
+  const cbs = t.agentCtxs.at(-1).listeners.get('agent/turn-stopping') || []
+  // 默认 skillNudgeInterval=3 → 连跑 3 轮才触发一次评审
+  for (let i = 0; i < 3; i++) for (const cb of cbs) await cb({ turn: i + 1 })
+  // reviewLog 是 export let：经 mod 读 live binding，并按 sessionId 定位本用例记录
+  // （同进程单例，跨用例共享）。
+  const mine = () => mod.reviewLog.recent().find((r) => r.sessionId === agent.session.id)
+  const deadline = Date.now() + 3000
+  while (!mine() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  return { agent, record: mine() }
+}
 
 /**
  * 带隔离技能根的 apply。
@@ -943,3 +981,162 @@ test('skills 未就绪不得静默丢运行时技能；就绪后必须注册（�
   applyIn(ready, { __skillsReady: true })
   assert.equal(ready.__test.runtimeSkills.length, 1, '就绪 → 注册')
 })
+
+// ---------------------------------------------------------------------------
+// 接线层（Task 4 fix round 1）：评审收尾把**用户配置**送进 transitions()，
+// 并把结果回显到 reviewLog / status / list。
+//
+// 为什么补这一组：apply.test.mjs 原来只测「崩溃路径」（坏 staleDays 只跳过本轮），
+// 从没有一条断言「配置真的传进去了」。于是 4 个变异全部存活：
+//   I-1 `lifecycleCounts || undefined` → `undefined`（记录里静默丢掉结果）
+//   I-2 整行删掉 `archiveEnabled: settings.spec().archiveEnabled`（status 不回显）
+//   I-3 `staleDays` / `archiveDays` 对调（配置被送错）
+//   I-4 删 syncWith / archiveEnabled 强制 true / list 去掉 archiveRoot
+// 判据必须落在**真实传参值**上：只断言「字段存在」的话，I-3（对调）照样存活。
+// ---------------------------------------------------------------------------
+
+test('评审收尾把 config 的 staleDays/archiveDays/archiveEnabled 原样送进 transitions()', async () => {
+  const env = makeCtx({})
+  reviewMock(env)
+  // 三个值刻意互不相同且顺序敏感：对调 staleDays/archiveDays 会被下面两条断言抓到。
+  applyIn(env, {
+    staleDays: { get: () => 11 },
+    archiveDays: { get: () => 77 },
+    archiveEnabled: { get: () => true }
+  })
+  const life = env.__test.lifecycle
+  // 磁盘上放一个技能（**不** markUsed）：transitions() 只能通过 syncWith() 看到它。
+  // 没有这条，删掉 syncWith 也照样绿（checked 恒 0）——I-4a 就是这么存活的。
+  mkdirSync(join(env.__test.skillsRoot, 'seeded-skill'), { recursive: true })
+  writeFileSync(
+    join(env.__test.skillsRoot, 'seeded-skill', 'SKILL.md'),
+    '---\nname: seeded-skill\ndescription: d\n---\n\n# x\n'
+  )
+
+  // 包装 transitions 记录入参（保留原实现调用——只观测，不改语义）
+  const seen = []
+  const original = life.transitions
+  life.transitions = (opts) => { seen.push(opts); return original.call(life, opts) }
+
+  const { record } = await fireReview(env)
+
+  assert.equal(seen.length, 1, '评审收尾必须调用一次 transitions()')
+  const opts = seen[0]
+  assert.equal(opts.staleDays, 11, 'staleDays 必须等于配置值（对调会变 77）')
+  assert.equal(opts.archiveDays, 77, 'archiveDays 必须等于配置值（对调会变 11）')
+  assert.equal(opts.archiveEnabled, true, 'archiveEnabled 必须来自配置，不能被写死/丢掉')
+  assert.equal(typeof opts.archiveFn, 'function', 'archiveFn 必须传下去（否则开了开关也不会归档）')
+
+  // I-1 正向路径：结果必须真的落进 reviewLog（`|| undefined` 变异会让它消失）
+  assert.ok(record, '评审必须落记录')
+  assert.ok(record.lifecycle, '记录里必须带 lifecycle 计数（不是 undefined）')
+  assert.equal(record.lifecycle.checked, 1, 'syncWith 必须把磁盘上的技能纳入本轮判定')
+})
+
+test('archiveEnabled=false 时评审收尾只判定不归档（配置值真的被遵守）', async () => {
+  // I-4b 存活体：把 `archiveEnabled: s.archiveEnabled` 改成写死 `true`，
+  // 上一组断言照样全绿——因为那里配置本来就是 true。必须有一条 **false** 用例
+  // 钉住「默认关 = 只报告不动磁盘」这条红线。
+  const env = makeCtx({})
+  reviewMock(env)
+  applyIn(env, {
+    archiveEnabled: { get: () => false },
+    archiveDays: { get: () => 1 },
+    staleDays: { get: () => 1 }
+  })
+  const t = env.__test
+  mkdirSync(join(t.skillsRoot, 'aged-skill'), { recursive: true })
+  writeFileSync(join(t.skillsRoot, 'aged-skill', 'SKILL.md'), '---\nname: aged-skill\ndescription: d\n---\n\n# x\n')
+  t.lifecycle.markUsed('aged-skill', { now: Date.now() - 100 * 86400000 })
+
+  const { record } = await fireReview(env)
+
+  assert.equal(record.lifecycle.wouldArchive, 1, '够格归档的技能必须被判定出来（判定与执行分离）')
+  assert.equal(record.lifecycle.archived, 0, 'archiveEnabled=false → 一个都不许动盘')
+  assert.ok(readdirSync(t.skillsRoot).includes('aged-skill'), '技能必须还在技能库里')
+  assert.equal(
+    existsSync(t.lifecycle.archiveRoot) ? readdirSync(t.lifecycle.archiveRoot).length : 0,
+    0,
+    '归档目录必须为空'
+  )
+})
+
+test('status 接口回显 config 里的 archiveEnabled 与 lifecycle 摘要', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true, archiveEnabled: { get: () => true } })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/status')
+  const body = await new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  // 默认（未配置）必须是 false —— 自动归档默认关是红线
+  assert.equal(body.archiveEnabled, true, 'status 的 archiveEnabled 必须回显配置值')
+
+  const off = makeCtx({})
+  applyIn(off, { __webServerReady: true })
+  const offRoute = off.__test.routes.find((r) => r.path === '/api/skill-curator/status')
+  const offBody = await new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    offRoute.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  assert.equal(offBody.archiveEnabled, false, '未配置 → 默认 false（不能写死 true）')
+  assert.ok(offBody.lifecycle, 'status 必须带 lifecycle')
+})
+
+test('skill-library-lifecycle 的 list 回显 archiveRoot', async () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const def = env.__test.tools.find((d) => d.name === 'skill-library-lifecycle')
+  const listed = await def.execute({ action: 'list' })
+  assert.equal(listed.ok, true)
+  assert.equal(
+    listed.data.archiveRoot,
+    env.__test.lifecycle.archiveRoot,
+    'list 必须回显归档根（用户要知道归档去了哪）'
+  )
+  assert.ok(String(listed.data.archiveRoot).length > 0)
+})
+
+test('excludedSkills 保护名单同样拦截**自动**归档（工具层之外的第二道闸）', async () => {
+  // 真缺陷（2026-10-20 评审）：工具层 skill-library-lifecycle 有保护名单守卫，
+  // 但评审收尾的自动归档没有 —— listSkills() 只把 excluded 用于填 protected 标记，
+  // 不过滤，随后 archiveFn 直接移目录。archiveEnabled 默认 false 掩盖了它。
+  const env = makeCtx({})
+  reviewMock(env)
+  applyIn(env, {
+    archiveEnabled: { get: () => true },
+    archiveDays: { get: () => 1 },
+    staleDays: { get: () => 1 },
+    excludedSkills: ['keep-me']
+  })
+  const t = env.__test
+  const archivedNames = () => (existsSync(t.lifecycle.archiveRoot) ? readdirSync(t.lifecycle.archiveRoot) : [])
+  // 两个技能都「超期」：lastUsedAt 设成 100 天前（archiveDays=1）
+  const old = Date.now() - 100 * 86400000
+  for (const n of ['keep-me', 'free-me']) {
+    mkdirSync(join(t.skillsRoot, n), { recursive: true })
+    writeFileSync(join(t.skillsRoot, n, 'SKILL.md'), `---\nname: ${n}\ndescription: d\n---\n\n# ${n}\n`)
+  }
+  t.lifecycle.markUsed('keep-me', { now: old })
+  t.lifecycle.markUsed('free-me', { now: old })
+
+  const { record } = await fireReview(env)
+
+  // 保护名单成员：磁盘上必须还在（工具层同源守卫）
+  assert.ok(
+    readdirSync(t.skillsRoot).includes('keep-me'),
+    'excludedSkills 成员不得被自动归档（磁盘文件必须还在）'
+  )
+  assert.equal(
+    archivedNames().includes('keep-me'),
+    false,
+    '保护名单成员绝不能出现在归档目录'
+  )
+  // 非保护成员：对照——开关真的开了、路径真的通（否则上面的断言可能是「整个归档没跑」的假绿）
+  assert.ok(
+    archivedNames().includes('free-me'),
+    '非保护成员应被归档（证明归档路径确实生效，保护名单断言不是假绿）'
+  )
+  assert.equal(record.lifecycle.archived, 1, '只归档了 1 个（受保护那个被拦下）')
+})
+

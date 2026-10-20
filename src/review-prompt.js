@@ -14,6 +14,8 @@
  *   - 技能库目录 = <DSH_HOME>/skills/<name>/SKILL.md，写入前自动备份。
  */
 
+import { TOOL_NAMES } from './skill-tools.js'
+
 const LANG_CLAUSE = `
 ## 语言与写法（通俗易懂是硬要求）
 - 正文一律中文，说人话：能一句话说清就不写一段，能用表格/步骤就不写长段。
@@ -92,6 +94,28 @@ const CONCLUSION = `
 「无需保存。」是真实选项，但只在会话顺畅、无纠正、无新技巧时用。
 完成所有写盘后，用一两行中文总结：改了哪个 skill（增/删/精简/合并）、建了什么文件。`
 
+/** 工具名 → 一句话职责（清单由 TOOL_NAMES 生成，避免「十件」这类硬编码漂移）。 */
+const TOOL_BLURBS = {
+  'skill-library-list': '全库概览',
+  'skill-library-read': '读任意文件，含 references/，返回 sha256',
+  'skill-library-tree': '看某技能里所有文件',
+  'skill-library-create': '新建技能',
+  'skill-library-patch': '改 SKILL.md（先读后改）',
+  'skill-library-write-file': '写支持文件（references/ templates/ scripts/）',
+  'skill-library-delete-file': '删支持文件',
+  'skill-library-delete': '删整个技能',
+  'skill-library-adopt': '给外部来源的技能盖 author 戳',
+  'skill-library-lifecycle': '技能生命周期：list（状态/最后使用/pinned）、archive（移出技能库到归档，可恢复）、restore（恢复归档）、pin（永久豁免 stale/archive）——技能只是「看起来没用」时用 archive，别删',
+  'skill-library-git': 'status/diff/log，自查你改了什么'
+}
+
+// 件数与名单都从 TOOL_NAMES 生成：手写清单在新增工具时会静默过期，
+// 子代理于是完全不知道新能力存在（2026-10-20 评审发现）。
+const TOOL_CLAUSE =
+  `你的全部工具能力只有 skill-library-* 这${TOOL_NAMES.length}件：` +
+  TOOL_NAMES.map((n) => (TOOL_BLURBS[n] ? `${n}（${TOOL_BLURBS[n]}）` : n)).join('、') +
+  '。'
+
 /** 完整评审指令（不含会话摘要，摘要由调用方置于前方）。 */
 export const REVIEW_INSTRUCTIONS = [
   '你是一个后台技能策展子代理。阅读上面的会话记录，维护技能库（增、删、改都算成果）。',
@@ -108,7 +132,7 @@ export const REVIEW_INSTRUCTIONS = [
   NEGATIVE_LIST,
   LANG_CLAUSE,
   '## 执行约束',
-  '你的全部工具能力只有 skill-library-* 这十件：skill-library-list（全库概览）、skill-library-read（读任意文件，含 references/，返回 sha256）、skill-library-tree（看某技能里所有文件）、skill-library-create、skill-library-patch、skill-library-write-file、skill-library-delete-file（删支持文件）、skill-library-delete（删整个技能）、skill-library-adopt、skill-library-git（status/diff/log，自查你改了什么）。',
+  TOOL_CLAUSE,
   '其他工具对你不可见、也不会执行——不要尝试。',
   '评价「更新已有 umbrella 还是新建」前，先 skill-library-list 看全库（含正文行数，臃肿一眼可见）。',
   CONCLUSION
