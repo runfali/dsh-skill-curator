@@ -7,6 +7,9 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/** 与 entry.test.mjs / client-smoke.mjs 同款：记一条通过项并打印。 */
+const ok = (label) => console.log('  ✓ ' + label)
+
 // 1. 模块可加载
 const settings = await import('../src/settings.js')
 const counters = await import('../src/counters.js')
@@ -43,6 +46,23 @@ for (const def of definitions) {
   assert.ok(def.output && def.output.schema, `${def.name} output schema`)
   assert.ok(def.parameters, `${def.name} parameters`)
 }
+
+// 3b. SKILL_ID 必须与宿主 dsh-skill 的 SKILL_NAME 逐字等价。
+// 背景：我们原来的 /^[a-z0-9][a-z0-9-]*$/ 比宿主宽松 —— `foo-` / `foo--bar`
+// 我们能建、宿主 isSkillName() 拒收 → 技能落盘但被静默忽略（dsh-skill-filesystem:685）。
+const HOST_SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+assert.equal(
+  tools.SKILL_ID.source,
+  HOST_SKILL_NAME.source,
+  'SKILL_ID 必须与宿主 SKILL_NAME 同源（否则能建出宿主看不见的技能）'
+)
+for (const bad of ['foo-', 'foo--bar', '-foo', 'Foo', 'a b']) {
+  assert.equal(tools.SKILL_ID.test(bad), false, `SKILL_ID 必须拒绝 ${bad}`)
+}
+for (const good of ['fs-troubleshooting', 'a-b-c', 'f', '9', '9a']) {
+  assert.equal(tools.SKILL_ID.test(good), true, `SKILL_ID 必须接受 ${good}`)
+}
+ok('SKILL_ID 与宿主 SKILL_NAME 同源（拒 foo- / foo--bar）')
 
 // 4. 白名单与工具名一致
 for (const name of tools.TOOL_NAMES) {

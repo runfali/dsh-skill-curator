@@ -27,8 +27,17 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 /** 插件盖章身份（frontmatter author，仅作来源标记）。 */
 export const CURATOR_AUTHOR = 'dsh-skill-curator'
 
-/** skill 名合法格式（对齐 dsh skill id 规则）。 */
-export const SKILL_ID = /^[a-z0-9][a-z0-9-]*$/
+/**
+ * skill 名合法格式。
+ *
+ * 必须与宿主 `dsh-skill` 的 `SKILL_NAME`（lib/index.js:17）**逐字同源**：
+ * `dsh-skill-filesystem` 在 parseSkillFile 里用 `isSkillName()` 校验，
+ * 不通过就 `logger.warn` 后**静默忽略**（lib/index.js:685）——技能写进磁盘却
+ * 永远不出现在会话目录里，且零报错。原实现 `/^[a-z0-9][a-z0-9-]*$/` 比宿主宽松，
+ * 会放行 `foo-` / `foo--bar` 这类宿主拒收的名字。
+ * @see test/smoke.mjs 「SKILL_ID 与宿主 SKILL_NAME 同源」
+ */
+export const SKILL_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 /**
  * 「skill-library-* 已注册完毕」的就绪标记服务名（preset-guard 的 inject 键）。
