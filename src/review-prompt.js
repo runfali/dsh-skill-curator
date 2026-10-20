@@ -105,7 +105,7 @@ const TOOL_BLURBS = {
   'skill-library-delete-file': '删支持文件',
   'skill-library-delete': '删整个技能',
   'skill-library-adopt': '给外部来源的技能盖 author 戳',
-  'skill-library-lifecycle': '技能生命周期：list（状态/最后使用/pinned）、archive（移出技能库到归档，可恢复）、restore（恢复归档）、pin（永久豁免 stale/archive）——技能只是「看起来没用」时用 archive，别删',
+  'skill-library-lifecycle': '技能生命周期：list（状态分桶 + pinned 名单 + lastPassAt，**不含逐技能时间戳**）、archive（移出技能库到归档，可恢复）、restore（恢复归档）、pin（永久豁免 stale/archive）——技能只是「看起来没用」时用 archive，别删',
   'skill-library-git': 'status/diff/log，自查你改了什么'
 }
 
