@@ -10,8 +10,15 @@
  * `whenToUse` **不进**模型可见目录。所以「怎么用」必须写进 description，
  * 不能像 dsh-learn 那样只写在 whenToUse 里（那样模型看不到）。
  *
- * rank 说明：运行时技能 rank=250，用户目录 rank=400（dsh-skill-filesystem:174）。
- * 若技能库里日后出现同名 `skill-curator`，用户版胜出（遮蔽，不是报错）。
+ * rank 说明（方向别写反）：运行时技能 rank=250，用户目录 rank=400
+ * （dsh-skill-filesystem:23 `USER_DSH_RANK`）。宿主按 rank **升序**排序、
+ * 去重时**第一个胜出**（dsh-skill/lib/index.js:519-521 `compareIndexedCandidates`
+ * 返回 `left.rank - right.rank`；:314-325 排序后遍历 `seen` 去重）——
+ * 所以 **rank 250 的运行时版压过 rank 400 的用户目录版**。
+ * 只有 project 级（`.dsh/skills` rank=100、`.agents/skills` rank=200）能遮蔽它；
+ * custom(300)/user-dsh(400)/user-agents(500) 全被运行时版遮蔽，宿主只打一条告警
+ * `skill "…" from <source> ignored because a higher-priority skill already exists`。
+ * 即：用户手写的同名 `skill-curator` 会被**静默遮蔽**（不报错）。
  */
 import { TOOL_NAMES } from './skill-tools.js'
 

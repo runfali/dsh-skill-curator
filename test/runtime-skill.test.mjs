@@ -17,16 +17,21 @@ test('description 非空且 ≤500 字符（catalog 渲染上限）', () => {
   assert.ok(CURATOR_SKILL.description.length <= 500, `实际 ${CURATOR_SKILL.description.length}`)
 })
 
-test('description 必须自带用法（because catalog 不渲染 whenToUse）', () => {
-  // 至少要提到核心动作与「先读后改」，否则模型看到目录也不知道怎么用
-  for (const needle of ['read', 'sha256', 'delete', 'lifecycle']) {
-    assert.ok(CURATOR_SKILL.description.toLowerCase().includes(needle), `description 必须提到 ${needle}`)
-  }
+test('description 必须自带用法散文（because catalog 不渲染 whenToUse）', () => {
+  // 旧版数关键词（read/sha256/delete/lifecycle）**名不副实**：纯工具名枚举 +
+  // 「(sha256)」这种零散文的 description 也能全数命中而存活。改为剥掉全部工具名后
+  // 再找**动作性短语**与**说明性散文**——只有真正写了用法才可能通过。
+  const prose = TOOL_NAMES.reduce((acc, n) => acc.split(n).join(' '), CURATOR_SKILL.description)
+  assert.match(prose, /\bread first\b|先读后改/i, 'description 必须含非工具名的动作性用法短语（如 read first）')
+  assert.match(prose, /\bmust\b|\bprefer\b|\balways\b|必须|优先/i, 'description 必须是说明性散文，不是纯工具名枚举')
 })
 
-test('content 覆盖全部白名单工具名', () => {
+test('content 覆盖全部白名单工具名（精确成行，禁止子串命中）', () => {
+  // 旧版用 includes()：`- `skill-library-delete-file`` 包含 `skill-library-delete`，
+  // 于是删掉 delete 那一行也照样绿。必须按行精确匹配。
+  const lines = CURATOR_SKILL.content.split('\n').map((l) => l.trim())
   for (const name of TOOL_NAMES) {
-    assert.ok(CURATOR_SKILL.content.includes(name), `content 必须说明 ${name}`)
+    assert.ok(lines.includes(`- \`${name}\``), `content 必须成行精确列出 ${name}（子串匹配会漏掉它）`)
   }
 })
 

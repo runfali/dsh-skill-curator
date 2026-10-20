@@ -57,6 +57,8 @@ function makeCtx(config = {}) {
   const provided = []
   // 运行时技能注册记录（skills.register 的入参）
   const runtimeSkills = []
+  // ctx.logger.warn 留痕（I4 守护用）
+  const warns = []
   // skills.register 返回的 disposer（断言它真的被 effect 托管）
   const skillDisposers = []
   // webServer 就绪开关：默认关（真机 apply 期的常见形态），需要时按测试打开。
@@ -72,6 +74,11 @@ function makeCtx(config = {}) {
   // 或 applyIn(env, {__skillsReady:true})（与 webServer/agents 同形）。
   let skillsReady = config.__skillsReady === true
   const skillsReadyGetter = () => skillsReady
+  // 故障注入（I4 守护）：register 抛错 / register 根本不存在。
+  // 前者钉住 try/catch（删掉它 apply 会炸主线）；后者钉住 `typeof register !== 'function'`
+  // 守卫（删掉它会走 register(...) → TypeError，落到 catch 里报另一种错，必须靠文案区分）。
+  const skillsRegisterThrows = config.__skillsRegisterThrows === true
+  const skillsRegisterMissing = config.__skillsRegisterMissing === true
   // 隔离：apply 时不给 skillsRoot，autoCommit 会落到**真实** ~/.dsh/skills 上提交。
   // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
@@ -84,7 +91,12 @@ function makeCtx(config = {}) {
 
   const ctx = {
     fiber: { state: 0 },
-    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    // warn 必须**留痕**：I4 的守护判据就是「register 抛错时不炸、但要 warn」。
+    // 原桩是空函数，`ctx.logger.warn` 被调用与否完全不可观测。
+    logger: {
+      debug() {}, info() {}, error() {},
+      warn(...a) { warns.push(a.map((x) => String(x)).join(' ')) }
+    },
     effect(fn) {
       const disposer = fn()
       effects.push(typeof disposer === 'function' ? disposer : undefined)
@@ -123,7 +135,17 @@ function makeCtx(config = {}) {
         // skills：dsh-skill 的 register(def) → disposer。只登记，不碰真实 DSH_HOME。
         // 返回**唯一哨兵** disposer：只有把它交给 effect 才测得出「卸载时收口」
         // （若实现直接调 register 而不包 effect，注册照样成功、断言照样绿）。
-        if (s === 'skills') services_.skills = { register(def) { runtimeSkills.push(def); const d = () => {}; skillDisposers.push(d); return d } }
+        if (s === 'skills') services_.skills = skillsRegisterMissing
+          ? {} // 服务在、但 register 不是函数（宿主换版/半初始化形态）
+          : {
+              register(def) {
+                if (skillsRegisterThrows) throw new Error('injected register failure')
+                runtimeSkills.push(def)
+                const d = () => {}
+                skillDisposers.push(d)
+                return d
+              }
+            }
       }
       cb({
         ...services_,
@@ -170,7 +192,7 @@ function makeCtx(config = {}) {
     __setWebServerReady(v) { webServerReady = v },
     __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
     __setSkillsReady(v) { skillsReady = v },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, runtimeSkills, skillDisposers, skillsRoot, backupRoot, home }
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, runtimeSkills, skillDisposers, warns, skillsRoot, backupRoot, home }
   }
   return ctx
 }
@@ -980,6 +1002,30 @@ test('skills 未就绪不得静默丢运行时技能；就绪后必须注册（�
   const ready = makeCtx({})
   applyIn(ready, { __skillsReady: true })
   assert.equal(ready.__test.runtimeSkills.length, 1, '就绪 → 注册')
+})
+
+// I4 守护：这条全局约束（「skills.register 抛错/缺失时只 warn，绝不抛」）此前
+// **无任何测试**——删掉 `typeof register !== 'function'` 守卫或删掉 try/catch，
+// 全套测试照样绿。两条用例分别钉死两个分支，且判据落在 warn 文案上，
+// 让「守卫被删 → 落到 catch → 报另一种文案」这种退化也能被抓到。
+test('skills.register 抛错时 apply 不抛，只 warn（try/catch 守护）', async () => {
+  const env = makeCtx({ __skillsReady: true, __skillsRegisterThrows: true })
+  assert.doesNotThrow(() => applyIn(env, {}), 'register 抛错绝不能炸掉 apply 主线')
+  assert.equal(env.__test.runtimeSkills.length, 0, '抛错时没有注册记录')
+  assert.ok(
+    env.__test.warns.some((w) => w.includes('runtime skill registration failed')),
+    `必须留下 warn（实际：${JSON.stringify(env.__test.warns)}）`
+  )
+})
+
+test('skills.register 不是函数时只 warn 不抛（typeof 守卫守护，且与 catch 分支可区分）', async () => {
+  const env = makeCtx({ __skillsReady: true, __skillsRegisterMissing: true })
+  assert.doesNotThrow(() => applyIn(env, {}), 'register 缺失绝不能炸掉 apply 主线')
+  assert.equal(env.__test.runtimeSkills.length, 0, '缺失时没有注册记录')
+  assert.ok(
+    env.__test.warns.some((w) => w.includes('skills.register unavailable')),
+    `必须命中守卫分支的专用文案（实际：${JSON.stringify(env.__test.warns)}）`
+  )
 })
 
 // ---------------------------------------------------------------------------
