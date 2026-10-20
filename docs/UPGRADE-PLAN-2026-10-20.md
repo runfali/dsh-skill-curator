@@ -1,4 +1,4 @@
-# 吸收 dsh-learn 升级方案（dsh-skill-curator 0.2.1 → 0.3.0）
+# 吸收 dsh-learn 升级方案（dsh-skill-curator 0.2.1-rc.2）
 
 > **For agentic workers:** 用 subagent-driven-development 或 executing-plans 逐任务实现。步骤用 `- [ ]` 跟踪。
 >
@@ -341,7 +341,7 @@ Expected: FAIL —— `Cannot find module '../src/lifecycle.js'`
  * 归档目录：<DSH_HOME>/skill-curator/archived/<name>/（**技能库之外**，
  * 否则宿主 provider 会把归档技能当正常技能发现）。
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -441,11 +441,22 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
     /**
      * 与磁盘同步：登记新技能、清理已消失的技能。
      * @param {string} root - 技能库根。
-     * @param {string[]} [names] - 已知技能名（缺省时调用方自行 readdir）。
+     * @param {string[]} [names] - 已知技能名；**省略时自己 readdir**（两种调用形态都必须成立）。
      * @returns {{seeded: number, dropped: number}}
      */
     syncWith(root, names) {
-      const list = Array.isArray(names) ? names : []
+      let list = names
+      if (!Array.isArray(list)) {
+        // 未显式传名单时自己读盘：技能库里有 SKILL.md 的目录才算技能。
+        // 省略 names 时返回 [] 会让 seeded 恒为 0（计划原稿的缺陷，执行期实测抓出）。
+        try {
+          list = readdirSync(root, { withFileTypes: true })
+            .filter((e) => e.isDirectory() && existsSync(join(root, e.name, 'SKILL.md')))
+            .map((e) => e.name)
+        } catch {
+          list = []
+        }
+      }
       const seen = new Set(list)
       let seeded = 0
       for (const name of list) {
@@ -755,7 +766,9 @@ test('新增 skill-library-lifecycle 工具：archive/restore/pin/list 四动作
   applyIn(env, {})
   const def = env.__test.tools.find((d) => d.name === 'skill-library-lifecycle')
   assert.ok(def, 'skill-library-lifecycle 必须注册')
-  assert.deepEqual(def.parameters.action.enum, ['list', 'archive', 'restore', 'pin'])
+  // defineTool 编译后是标准 JSON Schema：枚举在 parameters.properties.<key>.enum
+  // （实测 probe-enum.mjs；parameters.<key>.enum 恒为 undefined）。
+  assert.deepEqual(def.parameters.properties.action.enum, ['list', 'archive', 'restore', 'pin'])
   const listed = await def.execute({ action: 'list' })
   assert.equal(listed.ok, true)
   assert.ok(listed.data.lifecycle, 'list 返回生命周期摘要')
@@ -1094,12 +1107,13 @@ git commit -m "feat(skill): 注册运行时技能 skill-curator，把 skill-libr
 
 ---
 
-## Task 6: 文档与版本收口
+## Task 6: 文档收口
 
 **Files:**
 - Modify: `docs/COMPARISON.md`
 - Modify: `README.md`、`README.zh-CN.md`
-- Modify: `package.json`（version → `0.3.0-rc.1`）
+
+> 本任务**不**改 `package.json`（版本 bump 留到发版时单独做，见 Step 3 的 Ruling）。
 
 - [ ] **Step 1: 更新 `docs/COMPARISON.md`**
 
@@ -1141,9 +1155,11 @@ The plugin also registers a runtime skill named `skill-curator` so the model kno
 
 中文 README 加对应段落（含「最后使用按 skill 工具真实加载计算，不是文件修改时间」这句判据）。
 
-- [ ] **Step 3: 版本与自检**
+- [ ] **Step 3: 自检（本任务不 bump 版本）**
 
-`package.json` 的 `version` 改为 `0.3.0-rc.1`（**不要**动 `peerDependencies`：宿主闸只读 peer 区间，本次无契约变化）。
+> **Ruling（执行期，Lead）**：本任务**不改** `package.json` 的 `version`，也**不**动 `peerDependencies`。
+> 依据：本仓历史里 feature commit 不 bump 版本（`89886e0`/`15edb7c`/`0031578`/`6644b56` 四个 feature commit 的 version 都保持 `0.1.7-rc.2`）；bump 只发生在 release/适配点，且 tag 与 version 逐字一致。本轮改动尚未经真机重启验证，先写死新版本号会造出「版本已发但没验过」的状态。
+> 发版时再单独 bump + 打 tag。
 
 Run: `npm test`
 Expected: PASS
@@ -1151,8 +1167,8 @@ Expected: PASS
 - [ ] **Step 4: 提交**
 
 ```bash
-git add docs/COMPARISON.md README.md README.zh-CN.md package.json
-git commit -m "docs+chore: 记录 dsh-learn 机制吸收；bump 0.3.0-rc.1"
+git add docs/COMPARISON.md README.md README.zh-CN.md
+git commit -m "docs: 记录 dsh-learn 机制吸收（生命周期 + 运行时技能）与不吸收清单"
 ```
 
 ---
