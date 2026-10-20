@@ -436,11 +436,22 @@ test('listSkills aggregates bundle dirs only', async () => {
 })
 
 test('whitelist and output schema shape', () => {
-  assert.equal(TOOL_NAMES.length, 10)
-  for (const t of ['skill-library-delete', 'skill-library-delete-file', 'skill-library-tree', 'skill-library-git']) {
+  assert.equal(TOOL_NAMES.length, 11)
+  for (const t of ['skill-library-delete', 'skill-library-delete-file', 'skill-library-tree', 'skill-library-git', 'skill-library-lifecycle']) {
     assert.ok(TOOL_NAMES.includes(t), `whitelist includes ${t}`)
   }
   assert.ok(TOOL_NAMES.includes('skill-library-delete'), 'delete is part of the reviewer whitelist')
   assert.ok(TOOL_OUTPUT_SCHEMA.properties.ok.required === true)
   assert.equal(TOOL_OUTPUT_SCHEMA.properties.error.type, 'string')
+})
+
+test('skill-library-lifecycle 缺 store 时在 execute 内响亮失败（不在模块加载期炸编译）', async () => {
+  // 工厂不传 getLifecycle = 宿主未注入 store。编译必须照常成功（test/smoke.mjs 就是
+  // 这么调用它的：createSkillToolDefinitions(() => ({}))），只有真去执行才报错。
+  const defs = createSkillToolDefinitions(() => ({}))
+  const life = defs.find((d) => d.name === 'skill-library-lifecycle')
+  assert.ok(life, 'lifecycle 工具必须编译出来')
+  const out = await life.execute({ action: 'list' }, { signal: new AbortController().signal })
+  assert.equal(out.ok, false, '缺 store 时不得假装成功')
+  assert.match(out.error, /lifecycle store/, '错误信息必须指明缺什么')
 })

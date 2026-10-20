@@ -50,7 +50,13 @@ export const Config = z.object({
   /** 保护名单：这些 skill 只读，评审绝不改动（默认空 = 库内全部可改）。 */
   excludedSkills: z.array(z.string()).default([]).volatile(),
   /** 通知模式：off=静默 / on=宿主日志摘要 / verbose=日志含内容预览。 */
-  notifyMode: z.union(['off', 'on', 'verbose']).default('on').volatile()
+  notifyMode: z.union(['off', 'on', 'verbose']).default('on').volatile(),
+  /** 生命周期：多久未用标 stale（天）。 */
+  staleDays: z.number().step(1).min(1).max(3650).default(30).volatile(),
+  /** 生命周期：多久未用够格归档（天）。 */
+  archiveDays: z.number().step(1).min(1).max(3650).default(90).volatile(),
+  /** 生命周期：是否允许自动归档（默认关；开启后目录会被移到 skill-curator/archived/）。 */
+  archiveEnabled: z.boolean().default(false).volatile()
 })
 
 /**

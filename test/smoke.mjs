@@ -35,11 +35,16 @@ const merged = settings.mergeDefaults({ skillNudgeInterval: { get: () => 2 } })
 assert.equal(merged.enabled, true, 'missing key falls back to schema default')
 assert.equal(merged.skillNudgeInterval, 2, 'volatile live reference is dereferenced')
 assert.deepEqual(merged.excludedSkills, [], 'array default cloned, not shared')
+// 生命周期默认值（全局约束：自动归档默认关——它会把目录移出技能库，属破坏性动作，
+// 必须显式开启）。这条同时钉住「用户没写过这些键时 mergeDefaults 也补出默认值」。
+assert.equal(merged.archiveEnabled, false, 'archiveEnabled 默认必须为 false（自动归档是破坏性动作）')
+assert.equal(merged.staleDays, 30, 'staleDays 默认 30 天')
+assert.equal(merged.archiveDays, 90, 'archiveDays 默认 90 天')
 assert.equal(typeof host.reviewLog.recent, 'function', 'review log')
 
 // 3. 工具定义真实编译（defineTool 会校验 schema 形状）
 const definitions = tools.createSkillToolDefinitions(() => ({}))
-assert.equal(definitions.length, 10, 'ten skill-library tools')
+assert.equal(definitions.length, 11, 'eleven skill-library tools')
 for (const def of definitions) {
   assert.match(def.name, /^skill-library-/, `name ${def.name}`)
   assert.equal(typeof def.execute, 'function', `${def.name} execute`)

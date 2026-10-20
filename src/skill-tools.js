@@ -69,6 +69,7 @@ export const TOOL_NAMES = [
   'skill-library-delete-file',
   'skill-library-delete',
   'skill-library-adopt',
+  'skill-library-lifecycle',
   'skill-library-git'
 ]
 
@@ -469,11 +470,18 @@ export async function gitRootOf(skillsRootPath) {
 // ---------------------------------------------------------------------------
 
 /** 构造全部工具定义（注册进 tools 服务）。 */
-export function createSkillToolDefinitions(getConfig) {
+export function createSkillToolDefinitions(getConfig, getLifecycle = () => undefined) {
   const cfg = () => getConfig() || {}
   const rootOf = () => skillsRoot(cfg())
   const backupDirOf = () => backupRoot(cfg())
   const excludedOf = () => (Array.isArray(cfg().excludedSkills) ? cfg().excludedSkills.map(String) : [])
+  // lifecycle store 缺失时只在 execute 内抛错，不在模块加载期抛——否则
+  // test/smoke.mjs 的 defineTool 编译（createSkillToolDefinitions(() => ({}))）会当场炸。
+  const lifeOf = () => {
+    const life = getLifecycle()
+    if (!life) throw new Error('skill-library-lifecycle 需要 lifecycle store（apply 注入）')
+    return life
+  }
 
   const ok = (data) => ({ ok: true, data })
   const fail = (error) => ({ ok: false, error: String(error && error.message || error) })
@@ -816,6 +824,38 @@ export function createSkillToolDefinitions(getConfig) {
         if (commit.code !== 0) throw new Error(`git commit failed: ${commit.stderr.trim()}`)
         const head = await runGit(repo, ['rev-parse', '--short', 'HEAD'])
         return ok({ committed: true, sha: head.stdout.trim(), message, root: repo })
+      }
+    ),
+    tool(
+      'skill-library-lifecycle',
+      'Inspect or maintain the lifecycle of skills in the library: list (per-skill state active/stale/archived, ' +
+        'last-used time, pinned), archive (move a skill out of the library into the curator archive — recoverable, ' +
+        'never deleted), restore (bring an archived skill back), pin (exempt a skill from stale/archive forever). ' +
+        'Use this instead of deleting a skill that merely looks unused — archiving is reversible.',
+      {
+        action: { type: 'string', required: true, enum: ['list', 'archive', 'restore', 'pin'] },
+        name: { type: 'string', description: 'Target skill name (required for archive/restore/pin).' },
+        pinned: { type: 'boolean', description: 'For action=pin: true to pin, false to unpin.' }
+      },
+      async (args) => {
+        const life = lifeOf()
+        const action = String(args.action || '')
+        if (action === 'list') return ok({ lifecycle: life.summary(), archiveRoot: life.archiveRoot })
+        const name = String(args.name || '')
+        if (!SKILL_ID.test(name)) throw new Error(`invalid skill name (must match ${SKILL_ID}): ${name}`)
+        if (action === 'archive') {
+          if (excludedOf().includes(name)) throw new Error(`skill '${name}' 在 excludedSkills 保护名单里，禁止归档。`)
+          const moved = life.archive(name, rootOf())
+          if (!moved) throw new Error(`归档失败：'${name}' 不存在，或归档目录已有同名（先 restore 或手工处理）`)
+          return ok({ archived: name, archiveRoot: life.archiveRoot })
+        }
+        if (action === 'restore') {
+          const moved = life.restore(name, rootOf())
+          if (!moved) throw new Error(`恢复失败：归档里没有 '${name}'，或技能库已有同名`)
+          return ok({ restored: name })
+        }
+        if (action === 'pin') return ok({ name, pinned: life.setPinned(name, args.pinned !== false) })
+        throw new Error(`unknown action: ${action}`)
       }
     )
   ]

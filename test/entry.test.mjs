@@ -259,7 +259,7 @@ const fieldsBlock = /const FIELDS = \[([\s\S]*?)\n    \]/.exec(clientSrc)
 assert.ok(fieldsBlock, 'lib/client.js 里找不到 FIELDS（键集合守卫失效）')
 const clientKeys = [...fieldsBlock[1].matchAll(/key: "([^"]+)"/g)].map((m) => m[1]).sort()
 assert.deepEqual(clientKeys, hostKeys, 'client FIELDS 键集合必须与 host Config 键集合逐键相等（缺一键 = 设置页调不到该开关）')
-assert.equal(hostKeys.length, 13, 'host Config 键数为 13（漂移则同步本断言与文档）')
+assert.equal(hostKeys.length, 16, 'host Config 键数为 16（漂移则同步本断言与文档）')
 // 0.1.7 热编辑的前提：每个可编辑字段都必须 .volatile()（非 volatile = 改一次重启一次 fiber）
 const volatileCount = (configBlock[1].match(/\.volatile\(\)/g) || []).length
 assert.equal(volatileCount, hostKeys.length, 'host Config 全部字段都必须 .volatile()（' + volatileCount + '/' + hostKeys.length + '）')

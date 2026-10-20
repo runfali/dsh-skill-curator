@@ -30,7 +30,7 @@ import { createCounter } from './counters.js'
 import { buildDigest, truncateDigest } from './digest.js'
 import { buildReviewPrompt } from './review-prompt.js'
 import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
-import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, runGit } from './skill-tools.js'
+import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, listSkills, runGit } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 import { createLifecycleStore } from './lifecycle.js'
 
@@ -180,7 +180,7 @@ export function apply(ctx, config = {}) {
   // 注意：必须传 spec()（已解引用 volatile 活引用），不能传 base()（原始 config）。
   // base() 里的 excludedSkills 是 {get()} 对象，Array.isArray 判为 false →
   // 保护名单会静默失效（写入保护形同虚设）。skillsRoot/backupRoot 是普通字段，spec() 同样带出。
-  for (const definition of createSkillToolDefinitions(() => settings.spec())) {
+  for (const definition of createSkillToolDefinitions(() => settings.spec(), () => lifecycle)) {
     ctx.tools.register(definition)
   }
   // 就绪标记：必须在工具注册**之后**发布。preset 里的 preset-guard 靠它
@@ -252,6 +252,23 @@ export function apply(ctx, config = {}) {
           getSpec: () => settings.spec()
         })
         const actions = out.actions || []
+        // 生命周期迁移挂在评审流程上（评审每 N 轮必跑，无需独立定时器）。
+        // 判定与执行分离：archiveEnabled 默认 false → 只报告不动磁盘。
+        // transitions() 对非有限 staleDays/archiveDays 会抛错（响亮失败设计），
+        // 所以必须包 try/catch：设置项被写坏时只跳过本轮，绝不炸掉整个评审。
+        let lifecycleCounts = null
+        try {
+          const names = (await listSkills(skillsRoot(s), s.excludedSkills || [])).map((k) => k.name)
+          lifecycle.syncWith(skillsRoot(s), names)
+          lifecycleCounts = lifecycle.transitions({
+            staleDays: s.staleDays,
+            archiveDays: s.archiveDays,
+            archiveEnabled: s.archiveEnabled,
+            archiveFn: (name) => lifecycle.archive(name, skillsRoot(s))
+          })
+        } catch (error) {
+          ctx.logger.warn('skill-curator: lifecycle pass failed: %s', (error && error.message) || error)
+        }
         // 收尾自动 commit（2026-09-28 发哥拍板）：评审写进技能库的改动立刻进 git，
         // 否则「子代理写了什么」既无历史也无 diff 兜底。失败只告警，绝不影响评审结论。
         let versionBackstop = null
@@ -265,6 +282,7 @@ export function apply(ctx, config = {}) {
           summary: out.summary,
           diagnostic: out.diagnostic || undefined,
           fallback: out.fallback,
+          lifecycle: lifecycleCounts || undefined,
           commit: versionBackstop || undefined
         })
         const notify = String(s.notifyMode || 'on')
@@ -461,6 +479,8 @@ export function apply(ctx, config = {}) {
             // 所以这里的 broken 是**活体**状态，不是 activate 时的一次性快照。
             // 期望 'ok'；若为 broken 文本，说明 preset 里的 guard 仍在报错。
             reviewPreset: await reviewPresetStatus(ctx),
+            lifecycle: lifecycle.summary(),
+            archiveEnabled: settings.spec().archiveEnabled,
             reviews: reviewLog.recent().slice(0, 5)
           })
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })

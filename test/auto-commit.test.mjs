@@ -34,7 +34,13 @@ function host(skillsRoot) {
     get: (k) => (k === 'commands' ? { register: () => () => {} } : undefined)
   }
   mkdirSync(skillsRoot, { recursive: true })
-  mod.apply(ctx, { skillsRoot, backupRoot: mkdtempSync(join(tmpdir(), 'sc-ac-bk-')) })
+  // lifecycle 隔离：不传 lifecyclePath 时 store 默认指向真实 ~/.dsh/skill-curator/lifecycle.json，
+  // 而 Task 4 起评审收尾会跑 syncWith()/transitions()（都会 persist）→ 会写真实用户目录。
+  mod.apply(ctx, {
+    skillsRoot,
+    backupRoot: mkdtempSync(join(tmpdir(), 'sc-ac-bk-')),
+    lifecyclePath: join(mkdtempSync(join(tmpdir(), 'sc-ac-home-')), 'lifecycle.json')
+  })
   return seen
 }
 
@@ -96,7 +102,11 @@ test('review completion auto-commits the skill library (real git, real plugin en
     provide: (name, value) => { seen.provided.push({ name, value }); return () => {} },
     get: (k) => (k === 'subagents' ? subagents : k === 'commands' ? { register: (d) => { seen.__cmd = d; return () => {} } } : undefined)
   }
-  mod.apply(ctx2, { skillsRoot: skills, backupRoot: mkdtempSync(join(tmpdir(), 'sc-ac-bk2-')) })
+  mod.apply(ctx2, {
+    skillsRoot: skills,
+    backupRoot: mkdtempSync(join(tmpdir(), 'sc-ac-bk2-')),
+    lifecyclePath: join(mkdtempSync(join(tmpdir(), 'sc-ac-home2-')), 'lifecycle.json')
+  })
   assert.ok(seen.__cmd, '/skill-refine registered')
   seen.__cmd.handler({ agent, rawInput: '', signal: new AbortController().signal })
 

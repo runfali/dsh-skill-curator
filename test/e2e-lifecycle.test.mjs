@@ -55,7 +55,11 @@ function setup() {
   const { ctx, seen } = makeHost()
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-e2e-skills-'))
   const backupRoot = mkdtempSync(join(tmpdir(), 'sc-e2e-backup-'))
-  mod.apply(ctx, { skillsRoot, backupRoot })
+  // lifecycle 隔离（Task 3 评审转来的硬要求）：不传 lifecyclePath 时 store 默认指向
+  // **真实** ~/.dsh/skill-curator/lifecycle.json，而 Task 4 起 apply 会在评审收尾跑
+  // syncWith()/transitions()（都会 persist）→ 测试会写真实用户目录。
+  const lifecyclePath = join(mkdtempSync(join(tmpdir(), 'sc-e2e-home-')), 'lifecycle.json')
+  mod.apply(ctx, { skillsRoot, backupRoot, lifecyclePath })
   const byName = Object.fromEntries(seen.tools.map((d) => [d.name, d]))
   const sig = { signal: new AbortController().signal }
   const call = (name, args) => byName[name].execute(args, sig)
@@ -65,7 +69,7 @@ function setup() {
 
 test('apply wires the full surface (tools / command / route / settings page policy)', () => {
   const { seen } = setup()
-  assert.equal(seen.tools.length, 10, 'ten skill-library tools')
+  assert.equal(seen.tools.length, 11, 'eleven skill-library tools')
   assert.equal(seen.commands[0].name, 'skill-refine', '/skill-refine registered')
   assert.equal(seen.routes[0].path, '/api/skill-curator/status', 'status route registered')
   assert.equal(seen.presentations.length, 1, 'settings.configure called once')
@@ -153,7 +157,8 @@ test('protection list blocks writes end-to-end (live config)', async () => {
   const { ctx, seen } = makeHost()
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-e2e-guard-'))
   const excluded = ['locked']
-  mod.apply(ctx, { skillsRoot, excludedSkills: { get: () => excluded } })
+  // lifecycle 隔离：理由同 setup()（不隔离 = 写真实 ~/.dsh/skill-curator/lifecycle.json）
+  mod.apply(ctx, { skillsRoot, excludedSkills: { get: () => excluded }, lifecyclePath: join(mkdtempSync(join(tmpdir(), 'sc-e2e-guard-home-')), 'lifecycle.json') })
   const call = (name, args) => seen.tools.find((d) => d.name === name).execute(args, { signal: new AbortController().signal })
 
   const blocked = await call('skill-library-create', { name: 'locked', description: 'd', content: '# x' })

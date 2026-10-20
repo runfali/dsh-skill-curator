@@ -42,10 +42,13 @@ const jsxStub = { jsx: makeJsx(), jsxs: makeJsx() }
 
 let renderDepth = 0
 const renderedTags = []
+// 渲染出来的文本节点（字符串子节点）。tree2 只是**元素树**（组件未执行），
+// 断言「面板上真的出现了这一组」必须看渲染产物，不是元素树。
+let renderedText = []
 function renderTree(node) {
   if (node === null || node === undefined) return
   if (Array.isArray(node)) { for (const c of node) renderTree(c); return }
-  if (typeof node === 'string' || typeof node === 'number') return
+  if (typeof node === 'string' || typeof node === 'number') { renderedText.push(String(node)); return }
   if (typeof node.type === 'function') {
     renderDepth += 1
     if (renderDepth > 60) throw new Error('component tree too deep — likely infinite recursion')
@@ -152,7 +155,7 @@ const dict = registered.locales[0].dict
 const zhKeys = Object.keys(dict.zh)
 const enKeys = Object.keys(dict.en)
 assert.deepEqual(enKeys.sort(), zhKeys.sort(), 'zh/en key parity')
-const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'reviewBaseUrl', 'reviewApiKey', 'excludedSkills', 'notifyMode']
+const fieldKeys = ['enabled', 'skillNudgeInterval', 'digestTail', 'digestMaxChars', 'reviewTimeoutMs', 'reviewProvider', 'reviewModel', 'reviewBaseUrl', 'reviewApiKey', 'reviewRetryCount', 'reviewRetryDelayMs', 'excludedSkills', 'notifyMode', 'staleDays', 'archiveDays', 'archiveEnabled']
 for (const k of fieldKeys) {
   assert.ok(zhKeys.includes('field.' + k), `field.${k} label`)
   assert.ok(zhKeys.includes('hint.' + k), `hint.${k} hint`)
@@ -227,6 +230,13 @@ assert.ok(renderedTags.includes('select') === false, 'enum rendered as segmented
 assert.ok(renderedTags.includes('ul') || renderedTags.includes('p'), 'expanded: status panel rendered')
 const json = JSON.stringify(tree2)
 assert.ok(!json.includes('undefined'), 'no undefined leakage in render')
+// 分组真的要渲染出来：只查 FIELDS/GROUPS 数组存在（entry.test.mjs 已查）不等于
+// 面板上有这一组——组标题不进 GROUPS 就静默消失，用户永远看不到这三个开关。
+const text2 = renderedText.join(' | ')
+assert.ok(text2.includes('技能生命周期'), 'expanded: lifecycle group title rendered')
+for (const label of ['多久未用标记为 stale（天）', '多久未用够格归档（天）', '允许自动归档']) {
+  assert.ok(text2.includes(label), `expanded: lifecycle field rendered — ${label}`)
+}
 ok('expanded render (FieldRow all branches, status panel)')
 
 // ---- hooks 顺序守护：summary / detail 视图切换不得改变 hooks 数量 ----

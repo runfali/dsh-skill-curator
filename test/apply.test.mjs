@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -212,7 +212,7 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   const env = makeCtx({})
   applyIn(env, { __webServerReady: true })
   const t = env.__test
-  assert.equal(t.tools.length, 10, 'ten skill-library tools registered')
+  assert.equal(t.tools.length, 11, 'eleven skill-library tools registered')
   assert.equal(t.listeners.has('agent/created'), true, 'agent/created listener registered')
   assert.equal(t.commands.length, 1, '/skill-refine registered')
   assert.equal(t.commands[0].name, 'skill-refine')
@@ -223,7 +223,7 @@ test('apply registers full chain (tools/listener/command/route)', async () => {
   assert.equal(t.presentations[0].presentation.auto, false, 'auto page disabled')
 })
 
-test('apply 必须在注册完 10 个工具**之后**才发布就绪标记（顺序反了 = preset 守卫失效）', async () => {
+test('apply 必须在注册完 11 个工具**之后**才发布就绪标记（顺序反了 = preset 守卫失效）', async () => {
   // 真机事故（2026-10-18）：preset 内的 preset-guard 用 tools.restrict({allow}) 收敛
   // 子代理工具面，而 restrict 用 view(scope).restrictableNames 校验名字 —— 它只收
   // **继承面**（dsh-tools/lib/index.js:3058-3070）。profile 各行由 EntryGroup.update
@@ -248,8 +248,8 @@ test('apply 必须在注册完 10 个工具**之后**才发布就绪标记（顺
   )
   assert.equal(
     order.filter((s) => s.startsWith('register:')).length,
-    10,
-    '10 个工具都要在标记之前注册'
+    11,
+    '11 个工具都要在标记之前注册'
   )
   assert.equal(
     provideAt,
@@ -371,7 +371,7 @@ test('trigger chain: 3 turns fire one review via mocked subagents', async () => 
   await new Promise((r) => setTimeout(r, 10)) // 微任务调度
   assert.equal(started.length, 1, 'review spawned at interval')
   assert.equal(started[0].provider, 'spawn')
-  assert.equal(started[0].toolFilter.allow.length, 10, 'whitelist lists all ten tools')
+  assert.equal(started[0].toolFilter.allow.length, 11, 'whitelist lists all eleven tools')
   const promptText = started[0].prompt.map((b) => b.text || '').join('\n')
   assert.ok(promptText.includes('第一轮提问'), 'digest contains user turn')
   assert.ok(promptText.includes('技能策展子代理'), 'instructions appended')
@@ -716,8 +716,14 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   // 模拟宿主 waterfall 签名 (exec, next)。用计数器把「next() 真的被调用」变成
   // 可观测断言：只返回 allow 字面量而不调 next，等于跳过后续监听器与内建处理
   // （实际把工具拦掉），但返回值形状完全看不出来。
+  //
+  // 返回值透传（Task 3 复审转来的要求）：next 返回一个**唯一哨兵对象**，断言用
+  // 同一引用比较。若实现改成 `await next(); return { kind: 'allow' }`，字面量 allow
+  // 会覆盖掉后续监听器的 deny（安全相关窄口子），而 deepEqual({kind:'allow'}) 会
+  // **存活**——引用比较才钉得住「原样透传」。
   let nextCalls = 0
-  const next = async () => { nextCalls += 1; return { kind: 'allow' } }
+  const sentinel = { kind: 'allow', __sentinel: 'pre-execute-passthrough' }
+  const next = async () => { nextCalls += 1; return sentinel }
   await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
   const life = env.__test.lifecycle
   assert.ok(life, 'apply 必须暴露 lifecycle store 供状态接口复用')
@@ -744,15 +750,150 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   const beforePass = nextCalls
   const decision = await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
   assert.equal(nextCalls, beforePass + 1, 'pre-execute 必须调用 next()（不调 = 跳过后续监听器与内建处理，等于拦掉工具）')
-  assert.deepEqual(decision, { kind: 'allow' }, 'pre-execute 必须放行，不能拦工具')
+  assert.equal(decision, sentinel, 'pre-execute 必须**原样透传** next() 的返回值（自己造 allow 字面量会覆盖后续监听器的 deny）')
 
   // 观测自身抛错也只 warn：绝不把工具拦掉、绝不炸主线
   let boomCalls = 0
-  const boom = async () => { boomCalls += 1; return { kind: 'allow' } }
+  const boomSentinel = { kind: 'allow', __sentinel: 'boom-passthrough' }
+  const boom = async () => { boomCalls += 1; return boomSentinel }
   const original = life.markUsed
   life.markUsed = () => { throw new Error('boom') }
   const afterThrow = await cbs[0]({ name: 'skill', arguments: { name: 'delta-skill' }, agent: { session: { header: {} } } }, boom)
   assert.equal(boomCalls, 1, '观测异常后仍必须调用 next()（不调 = 把工具拦掉）')
-  assert.deepEqual(afterThrow, { kind: 'allow' }, '观测异常后仍必须放行')
+  assert.equal(afterThrow, boomSentinel, '观测异常后仍必须原样透传 next() 的返回值')
   life.markUsed = original
+})
+
+test('新增 skill-library-lifecycle 工具：archive/restore/pin/list 四动作', async () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const def = env.__test.tools.find((d) => d.name === 'skill-library-lifecycle')
+  assert.ok(def, 'skill-library-lifecycle 必须注册')
+  // defineTool 编译后是标准 JSON Schema：枚举在 parameters.properties.<key>.enum
+  // （实测 probe-enum.mjs；parameters.<key>.enum 恒为 undefined）。
+  assert.deepEqual(def.parameters.properties.action.enum, ['list', 'archive', 'restore', 'pin'])
+  const listed = await def.execute({ action: 'list' })
+  assert.equal(listed.ok, true)
+  assert.ok(listed.data.lifecycle, 'list 返回生命周期摘要')
+})
+
+test('skill-library-lifecycle 的 archive/restore/pin 真的动盘且可回滚', async () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const life = t.tools.find((d) => d.name === 'skill-library-lifecycle')
+  const create = t.tools.find((d) => d.name === 'skill-library-create')
+  const sig = { signal: new AbortController().signal }
+  await create.execute({ name: 'temp-skill', description: 'd', content: '# x' }, sig)
+
+  // archive：技能目录移出技能库 → 归档根（可恢复，不是删除）
+  const archived = await life.execute({ action: 'archive', name: 'temp-skill' }, sig)
+  assert.equal(archived.ok, true, `archive 应成功：${archived.error || ''}`)
+  assert.ok(readdirSync(t.skillsRoot).includes('temp-skill') === false, '技能已移出技能库')
+  assert.ok(readdirSync(archived.data.archiveRoot).includes('temp-skill'), '技能落在归档根')
+
+  // 重复归档失败（归档里已有同名）→ 明确报错，不覆盖旧归档
+  const dup = await life.execute({ action: 'archive', name: 'temp-skill' }, sig)
+  assert.equal(dup.ok, false, '重名归档被拒（覆盖 = 恢复承诺失效）')
+
+  // restore：回到技能库
+  const restored = await life.execute({ action: 'restore', name: 'temp-skill' }, sig)
+  assert.equal(restored.ok, true, `restore 应成功：${restored.error || ''}`)
+  assert.ok(readdirSync(t.skillsRoot).includes('temp-skill'), '技能回到技能库')
+
+  // pin / unpin：pinned 字段随参数变化
+  const pinned = await life.execute({ action: 'pin', name: 'temp-skill', pinned: true }, sig)
+  assert.equal(pinned.data.pinned, true)
+  assert.ok((await life.execute({ action: 'list' }, sig)).data.lifecycle.pinned.includes('temp-skill'))
+  const unpinned = await life.execute({ action: 'pin', name: 'temp-skill', pinned: false }, sig)
+  assert.equal(unpinned.data.pinned, false)
+
+  // 保护名单成员禁止归档（归档会把它移出库，等于绕过保护）
+  const env2 = makeCtx({})
+  applyIn(env2, { excludedSkills: ['keep-me'] })
+  const life2 = env2.__test.tools.find((d) => d.name === 'skill-library-lifecycle')
+  const guarded = await life2.execute({ action: 'archive', name: 'keep-me' }, sig)
+  assert.equal(guarded.ok, false)
+  assert.ok(guarded.error.includes('excludedSkills'))
+
+  // 非法名 / 未知动作：响亮失败
+  // 未知 action 在**参数层**就被 SDK 拒（枚举校验，早于我们的 execute）→ assert.rejects。
+  assert.equal((await life.execute({ action: 'archive', name: 'Bad Name' }, sig)).ok, false)
+  assert.ok((await life.execute({ action: 'archive', name: 'Bad Name' }, sig)).error.includes('invalid skill name'))
+  await assert.rejects(
+    async () => life.execute({ action: 'nope' }, sig),
+    /must be one of/,
+    '未知 action 必须在参数层被拒（枚举是白名单，不是提示）'
+  )
+})
+
+test('status 接口回显生命周期摘要', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/status')
+  const body = await new Promise((resolve) => {
+    const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  assert.ok(body.lifecycle, 'status 必须带 lifecycle')
+  assert.equal(typeof body.lifecycle.stale.length, 'number')
+})
+
+// transitions() 对非有限 staleDays/archiveDays 会抛错（Task 2 的响亮失败设计），
+// 而它现在挂在评审收尾的同步路径上：不包 try/catch 会让「设置项被写坏」直接炸掉
+// 整个评审（reviewLog 里连一条失败记录都不留）。这条钉住「跳过本轮、评审照常记录」。
+test('坏掉的 staleDays 不炸评审：transitions 抛错只跳过本轮生命周期迁移', async () => {
+  const env = makeCtx({})
+  env.get = (key) => {
+    if (key === 'subagents') {
+      return {
+        getProvider() { return undefined },
+        list: () => ['spawn'],
+        async start(p, request) {
+          return { result: Promise.resolve({ output: [{ type: 'text', text: '无需保存。' }], stopReason: 'completed' }), dispose: async () => {} }
+        }
+      }
+    }
+    return undefined
+  }
+  const warnings = []
+  env.logger.warn = (...a) => warnings.push(a.join(' '))
+  applyIn(env, { staleDays: { get: () => Number.NaN } })
+  const t = env.__test
+  const agent = makeAgent(env)
+  await emitOn(t.listeners, 'agent/created', { agent })
+  const cbs = t.agentCtxs[0].listeners.get('agent/turn-stopping')
+  for (let i = 0; i < 3; i++) for (const cb of cbs) await cb({ turn: i + 1 })
+  // reviewLog 是 export let：前面的 historyPath 覆盖用例会重建 store，
+  // 本文件顶部的 `const reviewLog = mod.reviewLog` 是旧引用 → 必须经 mod 读 live binding。
+  const deadline = Date.now() + 2000
+  const mine = () => mod.reviewLog.recent().find((r) => r.sessionId === agent.session.id)
+  while (!mine() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  const record = mine()
+  assert.ok(record, '评审照常落记录（生命周期迁移失败不阻断）')
+  assert.equal(record.ok, true, '评审本身仍然成功')
+  assert.equal(record.lifecycle, undefined, '迁移失败时不写 lifecycle 字段（不写半截数据）')
+  assert.ok(warnings.some((w) => w.includes('lifecycle pass failed')), '失败原因进 warn 日志')
+})
+
+// summary() 的形状守护（Task 2 评审指出的零覆盖缺口：Task 4 是它的第一个消费者，
+// 必须在依赖它之前钉住分桶与 pinned 字段，否则 Task 2 的 `out[rec.state] || out.active`
+// 把未知 state 静默归入 active 这类缺陷会一路带到面板上）。
+test('lifecycle.summary() 的分桶与 pinned 字段形状', () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const life = env.__test.lifecycle
+  const now = Date.now()
+  life.markUsed('used-skill', { now })
+  life.markUsed('pinned-skill', { now })
+  life.setPinned('pinned-skill', true)
+  const s = life.summary()
+  for (const bucket of ['active', 'stale', 'archived', 'neverUsed', 'pinned']) {
+    assert.ok(Array.isArray(s[bucket]), `summary().${bucket} 必须是数组`)
+  }
+  assert.ok(s.active.includes('used-skill'), '刚用过的技能在 active')
+  assert.ok(s.pinned.includes('pinned-skill'), 'pinned 列表含被钉住的技能')
+  assert.deepEqual(s.active, [...s.active].sort(), 'active 必须有序（面板输出稳定）')
 })
