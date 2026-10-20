@@ -713,8 +713,11 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   const cbs = t.listeners.get('tools/pre-execute')
   assert.ok(cbs && cbs.length === 1, '必须注册一个 tools/pre-execute 监听')
 
-  // 模拟宿主 waterfall 签名 (exec, next)
-  const next = async () => ({ kind: 'allow' })
+  // 模拟宿主 waterfall 签名 (exec, next)。用计数器把「next() 真的被调用」变成
+  // 可观测断言：只返回 allow 字面量而不调 next，等于跳过后续监听器与内建处理
+  // （实际把工具拦掉），但返回值形状完全看不出来。
+  let nextCalls = 0
+  const next = async () => { nextCalls += 1; return { kind: 'allow' } }
   await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
   const life = env.__test.lifecycle
   assert.ok(life, 'apply 必须暴露 lifecycle store 供状态接口复用')
@@ -736,15 +739,20 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   await cbs[0]({ name: 'skill', arguments: { name: 'gamma-skill' }, agent: { session: { header: { delegationDepth: 1 } } } }, next)
   assert.equal(life.snapshot().skills['gamma-skill'], undefined, '委派深度 > 0 不计数')
 
-  // 必须放行（waterfall 语义：返回 next() 的结果）
+  // 必须放行（waterfall 语义：**必须真的调用 next()**，只返回 allow 字面量不算 ——
+  // 不调 next 等于跳过后续监听器与内建处理，实际把工具拦掉，而返回值形状看不出来）
+  const beforePass = nextCalls
   const decision = await cbs[0]({ name: 'skill', arguments: { name: 'alpha-skill' }, agent: { session: { header: {} } } }, next)
+  assert.equal(nextCalls, beforePass + 1, 'pre-execute 必须调用 next()（不调 = 跳过后续监听器与内建处理，等于拦掉工具）')
   assert.deepEqual(decision, { kind: 'allow' }, 'pre-execute 必须放行，不能拦工具')
 
   // 观测自身抛错也只 warn：绝不把工具拦掉、绝不炸主线
-  const boom = async () => ({ kind: 'allow' })
+  let boomCalls = 0
+  const boom = async () => { boomCalls += 1; return { kind: 'allow' } }
   const original = life.markUsed
   life.markUsed = () => { throw new Error('boom') }
   const afterThrow = await cbs[0]({ name: 'skill', arguments: { name: 'delta-skill' }, agent: { session: { header: {} } } }, boom)
+  assert.equal(boomCalls, 1, '观测异常后仍必须调用 next()（不调 = 把工具拦掉）')
   assert.deepEqual(afterThrow, { kind: 'allow' }, '观测异常后仍必须放行')
   life.markUsed = original
 })
