@@ -806,6 +806,26 @@ test('status 接口回显生命周期摘要', async () => {
   assert.ok(body.lifecycle, 'status 必须带 lifecycle')
   assert.equal(typeof body.lifecycle.stale.length, 'number')
 })
+
+// summary() 的形状守护（Task 2 评审指出的零覆盖缺口：Task 4 是它的第一个消费者，
+// 必须在依赖它之前钉住分桶与 pinned 字段，否则 Task 2 的 `out[rec.state] || out.active`
+// 把未知 state 静默归入 active 这类缺陷会一路带到面板上）。
+test('lifecycle.summary() 的分桶与 pinned 字段形状', () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const life = env.__test.lifecycle
+  const now = Date.now()
+  life.markUsed('used-skill', { now })
+  life.markUsed('pinned-skill', { now })
+  life.setPinned('pinned-skill', true)
+  const s = life.summary()
+  for (const bucket of ['active', 'stale', 'archived', 'neverUsed', 'pinned']) {
+    assert.ok(Array.isArray(s[bucket]), `summary().${bucket} 必须是数组`)
+  }
+  assert.ok(s.active.includes('used-skill'), '刚用过的技能在 active')
+  assert.ok(s.pinned.includes('pinned-skill'), 'pinned 列表含被钉住的技能')
+  assert.deepEqual(s.active, [...s.active].sort(), 'active 必须有序（面板输出稳定）')
+})
 ```
 
 `test/client-smoke.mjs:155` 的 `fieldKeys` 数组追加 `'staleDays'`、`'archiveDays'`、`'archiveEnabled'`。
