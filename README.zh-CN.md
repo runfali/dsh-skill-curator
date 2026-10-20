@@ -70,10 +70,12 @@ dsh plugin --profile web add ./
 - **reviewRetryDelayMs** 重试退避基数：第 n 次重试等待 = 基数 × n 毫秒（默认 5000）
 - **digestTail / digestMaxChars** 摘要形态
 - **excludedSkills** 保护名单（逗号分隔）：列入的 skill 评审绝不改动（默认空 = 库内全部可改）
+- **staleDays / archiveDays** 生命周期窗口（天，默认 30 / 90），详见[技能生命周期](#技能生命周期)
+- **archiveEnabled** 允许自动归档（默认**关**：评审只提示，不动磁盘）
 
 ## 技能库工具（白名单）
 
-评审子代理只能调这十个工具（主会话也可直接用）：
+评审子代理只能调这十一个工具（主会话也可直接用）：
 
 | 工具 | 用途 |
 |---|---|
@@ -86,6 +88,7 @@ dsh plugin --profile web add ./
 | `skill-library-delete-file` | 删单个支持文件（先读后删，原件进备份） |
 | `skill-library-delete` | 删除冗余/已合并的 skill（先读后删，整目录进备份） |
 | `skill-library-adopt` | 给外部来源的 skill 盖 `author` 章（标记来源，非写入前提） |
+| `skill-library-lifecycle` | `list` / `archive` / `restore` / `pin`——查看或维护技能生命周期（归档可恢复，不是删除） |
 | `skill-library-git` | 技能库版本自查：**status / diff / log**（无 push、无 reset，不经 shell） |
 
 ### 四道安全网
@@ -96,6 +99,17 @@ dsh plugin --profile web add ./
 4. **git 兜底**：评审结束时**主线自动 commit**（message = 改动摘要 + session id）——每次评审都留下可回滚的版本点。提交失败只告警，绝不影响评审结论；技能根不是 git 工作树则跳过并记录原因。
 
 路径全部越界校验，写盘原子（tmp + rename）。写入后若正文超过 150 行，工具返回值会带一条「下沉 references/」的提醒（不拦截）。
+
+## 技能生命周期
+
+每个技能按 `active → stale → archived` 跟踪，判据是**真实使用**（`skill` 工具加载过），**不是文件 mtime**：
+
+- `staleDays`（默认 30）/ `archiveDays`（默认 90）——两个时间窗口
+- `archiveEnabled`（默认**关**）——关着时评审只**报告**哪些技能够格，磁盘上什么都不动
+- **钉住**——用 `skill-library-lifecycle` 钉住（设置项里没有对应字段），永久免疫 stale 与归档
+- 归档 = 移到 `<DSH_HOME>/skill-curator/archived/<name>/`，**技能库之外**（宿主因此不会把归档技能当正常技能发现），`restore` 随时拉回来
+
+插件还会注册一个名为 `skill-curator` 的运行时技能，让模型知道这十一个 `skill-library-*` 工具怎么用。
 
 ## 评审怎么写 skill（通俗不堆砌）
 

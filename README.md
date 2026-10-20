@@ -64,10 +64,12 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 - **reviewRetryDelayMs** — backoff base for retries, n-th retry waits `base × n` ms (default 5000)
 - **digestTail / digestMaxChars** — digest shape
 - **excludedSkills** — comma-separated names the reviewer must never touch (empty = the whole library is editable)
+- **staleDays / archiveDays** — skill lifecycle windows in days (default 30 / 90); see [Skill lifecycle](#skill-lifecycle)
+- **archiveEnabled** — allow automatic archiving (default **off**: reviews only report, nothing on disk moves)
 
 ## Skill library tools (whitelist)
 
-The review subagent can only call these ten (they are also usable by any session):
+The review subagent can only call these eleven (they are also usable by any session):
 
 | Tool | Purpose |
 |---|---|
@@ -80,6 +82,7 @@ The review subagent can only call these ten (they are also usable by any session
 | `skill-library-delete-file` | delete one support file (read-first; backed up) |
 | `skill-library-delete` | delete a redundant/merged-away skill (read-first; whole directory backed up) |
 | `skill-library-adopt` | stamp an externally authored skill with the author marker (provenance only) |
+| `skill-library-lifecycle` | `list` / `archive` / `restore` / `pin` — inspect or maintain skill lifecycle state (archive is recoverable, never a delete) |
 | `skill-library-git` | self-check the library repo: **status / diff / log** (no push, no reset, never a shell) |
 
 ### Four guardrails
@@ -90,6 +93,17 @@ The review subagent can only call these ten (they are also usable by any session
 4. **Git backstop** — at the end of every review the plugin **auto-commits** the library (message = change summary + session id), so every review leaves a rollback point. A failed commit only warns and never affects the review result; a non-git skills root is skipped with a recorded reason.
 
 Paths are boundary-checked; writes are atomic (tmp + rename). Bodies over 150 lines come back with a "move detail into `references/`" nudge in the tool result (advisory, never blocking).
+
+## Skill lifecycle
+
+Each skill is tracked as `active → stale → archived` by **real use** (a `skill` tool load), not by file mtime:
+
+- `staleDays` (default 30) / `archiveDays` (default 90) — windows
+- `archiveEnabled` (default **off**) — off means the review only *reports* which skills are eligible; nothing on disk moves
+- **pinning** — pin a skill via `skill-library-lifecycle` (there is no settings field for it) and it is exempt forever
+- Archived skills move to `<DSH_HOME>/skill-curator/archived/<name>/` — **outside** the library, so the host does not discover them, and `restore` brings them back
+
+The plugin also registers a runtime skill named `skill-curator` so the model knows how to use the eleven `skill-library-*` tools.
 
 ## How the reviewer writes skills (plain, not bloated)
 

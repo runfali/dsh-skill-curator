@@ -28,3 +28,24 @@
 3. **不注入父会话**：评审子代理是独立 session；摘要只走日志与状态接口。与 dsh-mem0-plugins 的「注入需 createUserMessage + 会污染会话」教训一致。
 4. **工具全局可见但语义受限**：skill-library-* 对任何会话可见（主会话也可手动用）；写入受「先读后改 + 备份 + 保护名单」三重机制约束，路径越界拒绝。子代理侧由 toolFilter 完全白名单化。
 5. **离线测试法**：`node_modules/@deepseek-ai` symlink 指向 dsh 安装副本（gitignore），可真实加载 schemastery/dsh-tools/dsh-subagent/dsh-settings 跑编译与单元测试；client bundle 用 vm 沙箱 + 组件树真实执行验证装配缺陷。
+
+## 吸收 dsh-learn（kouyichi/dsh-plugins）的机制（2026-10-20）
+
+调研档案：`D:\DSH\_research\dsh-learn\REPORT.md`（含上游 4 个源码级缺陷取证）。
+
+**吸收的两条**：
+
+| 机制 | 采纳形态 | 与上游的关键差异 |
+|---|---|---|
+| 技能生命周期状态机 | `src/lifecycle.js` + `skill-library-lifecycle` 工具（第 11 个）+ status 面板回显 | 上游 `markUsed()` 是死代码，`last_used_at` 只能由 SKILL.md mtime 兜底（「30 天未用」实为「30 天没改过文件」）。本实现用 `tools/pre-execute` 观测真实的 `skill` 工具调用，初值 `null` |
+| 运行时技能（工具用法说明书） | `src/runtime-skill.js` + `ctx.inject(['skills'])` 注册 | 上游把用法写在 `whenToUse`；实测宿主 catalog 只渲染 name+description（`dsh-tool-skill:42-47`），所以我们把用法写进 description |
+
+**不吸收的**：inbox→draft→promote 三段手动流程（与自动评审形态冲突）、`learn_record` 手工记录、周报、单文件 730 行无测试形态、`learn_review` 默认 dry-run（上游 dry-run 有真实磁盘副作用）。
+
+**顺带修的自己的缺口**：`SKILL_ID` 收紧对齐宿主 `SKILL_NAME`（原正则放行 `foo-`/`foo--bar`，宿主静默忽略）。
+
+### 落地时的三处取舍（与上游或简报原稿不同）
+
+1. **使用观测走 `tools/pre-execute`，不走 `ctx.tools.guard()`**：观测是纯副作用，不该占用「同步拒绝」通道；pre-execute 是官方扩展点（宿主先例 `dsh-tool-jobs:235`、`dsh-experimental-auto-review:462`）。waterfall 语义，必须 `return next()`。
+2. **`archiveEnabled` 默认 `false`**：本机技能库 68 个技能且是 git 仓库，自动移动目录属破坏性动作。默认只报告 `wouldArchive` 计数，磁盘不动 —— 也正因此不另做 `dry-run` 开关（默认态就是 dry-run）。
+3. **归档不覆盖旧归档**：上游在归档路径上先 `rmSync(dst, {recursive,force})`，同名二次归档会把旧归档删掉，「可恢复」承诺当场失效。本实现改为目标已存在即拒绝（返回 false + 告警）。
