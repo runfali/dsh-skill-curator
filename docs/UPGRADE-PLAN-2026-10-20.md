@@ -760,6 +760,7 @@ git commit -m "feat(observe): tools/pre-execute 观测 skill 工具调用，驱�
 - Modify: `src/index.js`（评审流程跑迁移；status 接口回显）
 - Modify: `lib/client.js`（FIELDS + GROUPS + locale）
 - Test: `test/entry.test.mjs`、`test/smoke.mjs`、`test/apply.test.mjs`、`test/client-smoke.mjs`
+- Modify（Task 3 评审转来的隔离修复，见 3c-2）: `test/e2e-lifecycle.test.mjs`、`test/auto-commit.test.mjs`
 
 **Interfaces:**
 - Consumes: `createLifecycleStore`（Task 2）、`lifecycle` 实例（Task 3）
@@ -923,6 +924,20 @@ status 接口 body 增加：
             lifecycle: lifecycle.summary(),
             archiveEnabled: settings.spec().archiveEnabled,
 ```
+
+**3c-2（Task 3 评审转来的硬要求）**：`test/e2e-lifecycle.test.mjs:58,156` 与 `test/auto-commit.test.mjs:37,99` 调 `apply()` 时**只隔离了 `skillsRoot`/`backupRoot`**，没隔离 lifecycle store → 会构造指向**真实** `~/.dsh/skill-curator/lifecycle.json` 的 store。Task 3 时无害（store 只读盘且容忍 ENOENT），但本任务在 apply 期接上 `syncWith()`/`transitions()` 后就会**写真实用户目录**。
+
+修法：给这 4 处 `apply()` 调用补 lifecycle 隔离（与 `test/apply.test.mjs` 同款：显式传 `file` + `archiveRoot` 落在临时目录；或直接传 `__lifecycle`）：
+
+```js
+mod.apply(ctx, {
+  skillsRoot,
+  backupRoot,
+  lifecyclePath: join(mkdtempSync(join(tmpdir(), 'sc-e2e-life-')), 'lifecycle.json')
+})
+```
+
+判据：跑完全仓测试后，真实 `~/.dsh/skill-curator/` 仍只有 `backups/` 与 `reviews.json`，且整个 `~/.dsh` 递归扫 `lifecycle.json` 零命中。**必须把这条对照写进报告。**
 
 **3d. `lib/client.js`** —— `FIELDS` 追加三行：
 
