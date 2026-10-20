@@ -55,6 +55,10 @@ function makeCtx(config = {}) {
   const agentCtxs = []
   const presentations = []
   const provided = []
+  // 运行时技能注册记录（skills.register 的入参）
+  const runtimeSkills = []
+  // skills.register 返回的 disposer（断言它真的被 effect 托管）
+  const skillDisposers = []
   // webServer 就绪开关：默认关（真机 apply 期的常见形态），需要时按测试打开。
   let webServerReady = false
   const webServerReadyGetter = () => webServerReady
@@ -62,6 +66,12 @@ function makeCtx(config = {}) {
   let agentsReady = false
   const agentsReadyGetter = () => agentsReady
   let agentsList = []
+  // skills 服务就绪开关：由 dsh-base 的 dsh-skill 行提供，与本插件 apply 时序不保证。
+  // 默认**关**——不关的话 ctx.inject(['skills'], cb) 永远回调，运行时技能
+  // 漏注册会被夹具掩盖成假绿。两种开关方式：makeCtx({__skillsReady:true})（简报用法）
+  // 或 applyIn(env, {__skillsReady:true})（与 webServer/agents 同形）。
+  let skillsReady = config.__skillsReady === true
+  const skillsReadyGetter = () => skillsReady
   // 隔离：apply 时不给 skillsRoot，autoCommit 会落到**真实** ~/.dsh/skills 上提交。
   // 每个测试一个临时技能根（+ 独立备份根），杜绝测试跑到真实技能库。
   const skillsRoot = mkdtempSync(join(tmpdir(), 'sc-apply-skills-'))
@@ -98,6 +108,7 @@ function makeCtx(config = {}) {
       // 与本插件 apply 时序不保证（默认未就绪，需测试显式打开）。
       const ready = list.every((s) =>
         (s !== 'webServer' || webServerReadyGetter()) &&
+        (s !== 'skills' || skillsReadyGetter()) &&
         (s !== 'agents' || agentsReadyGetter()))
       if (!ready) return () => {}
       // 注入回调拿到的是**子 ctx**：按请求的服务名挂上对应服务面（真实宿主同形）。
@@ -109,6 +120,10 @@ function makeCtx(config = {}) {
         if (s === 'settings') services_.settings = ctx.settings
         // agents：补注册现存 agent 的唯一通路（真机由 dsh-base 的 agent 行提供）
         if (s === 'agents') services_.agents = { list: () => agentsList }
+        // skills：dsh-skill 的 register(def) → disposer。只登记，不碰真实 DSH_HOME。
+        // 返回**唯一哨兵** disposer：只有把它交给 effect 才测得出「卸载时收口」
+        // （若实现直接调 register 而不包 effect，注册照样成功、断言照样绿）。
+        if (s === 'skills') services_.skills = { register(def) { runtimeSkills.push(def); const d = () => {}; skillDisposers.push(d); return d } }
       }
       cb({
         ...services_,
@@ -154,7 +169,8 @@ function makeCtx(config = {}) {
     },
     __setWebServerReady(v) { webServerReady = v },
     __setAgentsReady(v, list) { agentsReady = v; if (Array.isArray(list)) agentsList = list },
-    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, skillsRoot, backupRoot, home }
+    __setSkillsReady(v) { skillsReady = v },
+    __test: { effects, listeners, tools, commands, routes, agentCtxs, presentations, provided, runtimeSkills, skillDisposers, skillsRoot, backupRoot, home }
   }
   return ctx
 }
@@ -188,9 +204,10 @@ const emitOn = (listeners, event, ...args) => Promise.all((listeners.get(event) 
  * 产生了两条垃圾提交）。这里统一兜底，任何测试都不可能再写真实技能库。
  */
 function applyIn(env, config = {}) {
-  const { __webServerReady, __agentsReady, __agentsList, ...real } = config
+  const { __webServerReady, __agentsReady, __agentsList, __skillsReady, ...real } = config
   env.__setWebServerReady(__webServerReady === true)
   env.__setAgentsReady(__agentsReady === true, __agentsList)
+  if (__skillsReady !== undefined) env.__setSkillsReady(__skillsReady === true)
   // 显式注入测试用 lifecycle store：file 与 archiveRoot 都落在本测试的临时
   // home 内。不走 DSH_HOME 环境变量——apply.test.mjs 是独立进程，但同进程里
   // 其他用例（history-store 等）也读 DSH_HOME，改环境变量会串味；
@@ -896,4 +913,33 @@ test('lifecycle.summary() 的分桶与 pinned 字段形状', () => {
   assert.ok(s.active.includes('used-skill'), '刚用过的技能在 active')
   assert.ok(s.pinned.includes('pinned-skill'), 'pinned 列表含被钉住的技能')
   assert.deepEqual(s.active, [...s.active].sort(), 'active 必须有序（面板输出稳定）')
+})
+
+test('apply 注册运行时技能（skills.register）', async () => {
+  const env = makeCtx({ __skillsReady: true })
+  applyIn(env, {})
+  const regs = env.__test.runtimeSkills
+  assert.equal(regs.length, 1, '注册一个运行时技能')
+  assert.equal(regs[0].name, 'skill-curator')
+  assert.equal(typeof regs[0].description, 'string')
+  assert.ok(regs[0].content.length > 0)
+  // 注册必须包在 effect 里（官方范例 dsh-client-connection:843）：disposer 由 fiber
+  // 收口，热重载/卸载才不残留旧技能。裸调 register 时上面几条断言**照样全绿**。
+  assert.ok(
+    env.__test.effects.includes(env.__test.skillDisposers[0]),
+    'skills.register 的 disposer 必须交给 effect 托管'
+  )
+})
+
+test('skills 未就绪不得静默丢运行时技能；就绪后必须注册（第七路盲区回归）', async () => {
+  // skills 由 dsh-base 的 dsh-skill 行提供，与本插件 apply 时序不保证。
+  // 一次性 ctx.get('skills') 在服务未就绪时拿到 undefined → 静默不注册、零日志。
+  // 两态钉死：① 未就绪不注册（也不抛错）；② 服务随后就绪必须补注册。
+  const notReady = makeCtx({})
+  applyIn(notReady, {})
+  assert.equal(notReady.__test.runtimeSkills.length, 0, '未就绪 → 不注册')
+
+  const ready = makeCtx({})
+  applyIn(ready, { __skillsReady: true })
+  assert.equal(ready.__test.runtimeSkills.length, 1, '就绪 → 注册')
 })

@@ -33,6 +33,7 @@ import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
 import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, listSkills, runGit } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 import { createLifecycleStore } from './lifecycle.js'
+import { CURATOR_SKILL } from './runtime-skill.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
 export const name = 'skill-curator'
@@ -194,6 +195,31 @@ export function apply(ctx, config = {}) {
     `skill-curator: registered ${TOOL_NAMES.length} skill-library tools ` +
     `(curator author: ${CURATOR_AUTHOR}); ${TOOLS_READY_SERVICE} ready`
   )
+
+  // ---------------------------------------------------------------------
+  // 运行时技能：把这 11 个工具的用法写进主会话的技能目录
+  // ---------------------------------------------------------------------
+  // 等待式注入：skills 服务由 dsh-base 的 dsh-skill 行提供，与本插件 apply 时序不保证。
+  // 一次性 ctx.get('skills') 在服务未就绪时拿到 undefined → 静默不注册（第七路盲区同源）。
+  ctx.inject(['skills'], (sctx) => {
+    try {
+      if (typeof sctx.skills.register !== 'function') {
+        ctx.logger.warn('skill-curator: skills.register unavailable; runtime skill not registered')
+        return
+      }
+      // 官方范例（dsh-client-connection/lib/index.js:843）：注册必须包在 effect 里，
+      // 卸载时 disposer 由 fiber 收口，避免热重载后残留旧技能。
+      sctx.effect(() => sctx.skills.register({
+        name: CURATOR_SKILL.name,
+        description: CURATOR_SKILL.description,
+        whenToUse: CURATOR_SKILL.whenToUse,
+        source: 'custom',
+        content: CURATOR_SKILL.content
+      }), 'skill-curator: runtime skill')
+    } catch (error) {
+      ctx.logger.warn('skill-curator: runtime skill registration failed: %s', (error && error.message) || error)
+    }
+  })
 
   // ---------------------------------------------------------------------
   // 触发：agent/created → agent 级 turn-stopping 计数
