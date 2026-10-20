@@ -159,14 +159,23 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
      * @returns {{checked: number, markedStale: number, reactivated: number, wouldArchive: number, archived: number}}
      */
     transitions({ staleDays, archiveDays, archiveEnabled = false, now = Date.now(), archiveFn } = {}) {
+      // 非有限数字必须响亮失败：不校验时 `ageDays > undefined` 恒 false →
+      // 静默「什么都不标」，看起来像生命周期在工作，实际空转。
+      const stale = Number(staleDays)
+      const archive = Number(archiveDays)
+      if (!Number.isFinite(stale) || !Number.isFinite(archive)) {
+        throw new Error(
+          `lifecycle.transitions: staleDays/archiveDays must be finite numbers (got ${staleDays}/${archiveDays})`
+        )
+      }
       const counts = { checked: 0, markedStale: 0, reactivated: 0, wouldArchive: 0, archived: 0 }
       for (const [name, rec] of Object.entries(state.skills)) {
         counts.checked += 1
         if (rec.pinned) continue
         const anchor = rec.lastUsedAt ?? rec.firstSeenAt
         const ageDays = (now - anchor) / DAY_MS
-        const stale = ageDays > staleDays
-        const archiveable = ageDays > archiveDays
+        const isStale = ageDays > stale
+        const archiveable = ageDays > archive
         if (archiveable) {
           counts.wouldArchive += 1
           if (archiveEnabled && typeof archiveFn === 'function' && archiveFn(name)) {
@@ -174,10 +183,10 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
             continue
           }
         }
-        if (stale && rec.state === 'active') {
+        if (isStale && rec.state === 'active') {
           rec.state = 'stale'
           counts.markedStale += 1
-        } else if (!stale && rec.state === 'stale') {
+        } else if (!isStale && rec.state === 'stale') {
           rec.state = 'active'
           counts.reactivated += 1
         }

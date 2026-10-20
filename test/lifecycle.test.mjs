@@ -85,7 +85,15 @@ test('超过 archiveDays 时：archiveEnabled=false 只标 stale，不动磁盘'
   const state = store.snapshot()
   state.skills['alpha-skill'].lastUsedAt = Date.now() - 200 * DAY_MS
   store.__replaceForTest(state)
-  const counts = store.transitions({ staleDays: 30, archiveDays: 90, archiveEnabled: false })
+  // 关键两点，缺一就有变异体存活（实测）：
+  //   ① 注入 archiveFn —— 否则挡住归档的是 `typeof archiveFn !== 'function'`，
+  //      开关本身不可观测（删掉守卫里的 `archiveEnabled &&` 也全绿）。
+  //   ② **不传 archiveEnabled** —— 走默认值，否则把默认值改成 true 也全绿。
+  const counts = store.transitions({
+    staleDays: 30,
+    archiveDays: 90,
+    archiveFn: (n) => store.archive(n, root)
+  })
   assert.equal(counts.archived, 0, '默认不自动归档')
   assert.equal(counts.wouldArchive, 1, '但要报告「够格归档」')
   assert.ok(existsSync(join(root, 'alpha-skill', 'SKILL.md')), '磁盘必须原样不动')
@@ -152,6 +160,24 @@ test('归档目标已存在时返回 false 且绝不覆盖（避开 dsh-learn �
   assert.equal(readFileSync(join(dst, 'SKILL.md'), 'utf8'), 'old-archive\n', '旧归档必须原样保留')
   assert.ok(existsSync(join(root, 'alpha-skill', 'SKILL.md')), '原技能不动')
   assert.ok(warns.some((m) => m.includes('archive target exists')), '只打 warn')
+})
+
+test('staleDays/archiveDays 非有限数字时抛错，绝不静默空转', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'alpha-skill')
+  store.syncWith(root)
+  // 不校验时 `ageDays > undefined` 恒 false → 静默「什么都不标」，
+  // 看起来像生命周期在工作，实际空转。响亮失败优于静默 no-op。
+  assert.throws(
+    () => store.transitions({ archiveEnabled: false }),
+    /staleDays\/archiveDays must be finite numbers/,
+    'undefined 必须抛错'
+  )
+  assert.throws(
+    () => store.transitions({ staleDays: 30, archiveDays: NaN, archiveEnabled: false }),
+    /staleDays\/archiveDays must be finite numbers/,
+    'NaN 必须抛错'
+  )
 })
 
 test('markUsed 节流：60s 内多次调用只落盘一次', () => {
