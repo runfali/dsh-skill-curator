@@ -1,5 +1,7 @@
 # dsh-skill-curator — 自动技能策展插件
 
+> [English](README.md) | **简体中文**
+
 > **仓库简介**：DeepSeek Harness 自动技能策展插件——后台评审子代理定期复盘对话，自主**增删改** SKILL.md（先读后改 + 写前备份），让智能体在真实使用中持续自我进化，零侵入、不改 dsh 源码。
 
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 开发的自动技能策展 bundle 插件：每 N 轮真实对话（默认 **3**），后台起一个**评审子代理**阅读会话摘要，自主维护 `~/.dsh/skills/`——**改现有 skill、合并重复、删冗余、必要时新建**。把 Nous Research Hermes Agent 的「后台评审自我改进」闭环移植到 DSH，零侵入，不改 dsh 源码。
@@ -150,12 +152,11 @@ node test/smoke.mjs         # 模块/工具/白名单冒烟
 node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
 ```
 
-`docs/EVIDENCE.md` 记录隔离实例的安装/启动/真机验证（一次性 `DSH_HOME`，不碰任何已部署实例）；`docs/AUDIT.md` 记录各轮审计。
+测试全部在一次性 `DSH_HOME` 里跑，不碰任何已部署实例。
 
 ## dsh 0.2.1-rc.2 适配结论
 
-对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.1-rc.2`）做了 asar 解包源码比对 +
-真机验证。**0.2.1 是破坏性变更密集的一版**，光过兼容闸不够：
+针对 DSH `0.2.1-rc.2` 桌面包做了 asar 解包源码比对 + 端到端验证。**0.2.1 是破坏性变更密集的一版**，光过兼容闸不够：
 
 - **兼容闸只是入场券**：`dsh-subagent` 的包根**移除了 `settleRun` 导出**
   （只剩 `settleRunResult`，实现搬进 `lib/types/run-settlement.js` 但无 `exports` 子路径可达）。
@@ -170,7 +171,7 @@ node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
   而 `dsh-tool-subagent` 对 `config.toolFilter` 直接抛错并指向 preset。
   本插件因此声明了一个内部 preset（`skill-curator-review`），内挂
   `src/preset-guard.js` 在子代理自己的 scope 上调 `tools.restrict({ allow })`。
-- **preset 守卫必须等就绪标记**（真机事故，详见 `docs/AUDIT.md` 第八轮）：
+- **preset 守卫必须等就绪标记**：
   `restrict()` 用 `view(scope).restrictableNames` 校验名字，而它**只收继承面**；
   profile 各行由 `Promise.all` 并发创建，preset 行只 inject `tools` 而本插件还要等
   `settings` → preset 抢跑，那一刻工具还没注册 → 抛错 → registry 把 `record.broken`
@@ -189,8 +190,6 @@ node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
   `ResolutionRouter.replace()` 抛 `ResolutionRestartRequired` → 返回
   `restart-required / restartReason: "package-moved"`。此时**必须重启 dsh**；
   而 preset 的 broken 是写死的，重挂也救不回来。
-- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/AUDIT.md`（第七、八轮）。
-
 
 ## License
 

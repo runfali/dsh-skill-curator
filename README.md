@@ -2,7 +2,7 @@
 
 Automatic skill curation for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). After every N real conversation turns (default **3**), the plugin fires a background **subagent** that reads a digest of the session and **edits, merges, prunes and creates `SKILL.md` files** under the user skills directory (`~/.dsh/skills/`) — the same self-improvement loop Nous Research's Hermes Agent runs, ported to DSH as a zero-intrusion bundle plugin.
 
-> 中文说明见 [README.zh-CN.md](README.zh-CN.md).
+> **English** | [简体中文](README.zh-CN.md)
 
 ## How it works
 
@@ -58,7 +58,7 @@ Skip the restart? The plugin only takes effect on next start (standard bundle pl
 - **reviewProvider / reviewModel** — optional review subagent model override (empty = follow the session's current model)
 - **reviewBaseUrl / reviewApiKey** — optional custom review endpoint (OpenAI-compatible `/chat/completions`). When `reviewBaseUrl` + `reviewModel` are set, the review subagent runs against that endpoint through a dedicated adapter route (provider name = `reviewProvider`, or `skill-curator-review` by default). Settings are read live on every request — no restart needed
 - **Review history** persists to `~/.dsh/skill-curator/reviews.json` (last 50 entries) — survives plugin removal/reinstall and restarts
-- **Review resilience** — two layers for endpoint/model failures (HTTP/network/auth/rate-limit/model missing/timeout): ① if the custom endpoint fails, the review retries **once** on the session's own model (marked `⚠️已回退主模型` in host log / review log / status panel); ② if the final attempt then dies on an endpoint-class error or a detail-less `killed`, it retries up to `reviewRetryCount` times with `reviewRetryDelayMs` backoff — a model connection blip no longer loses the review. Tool-layer errors are never retried
+- **Review resilience** — two layers for endpoint/model failures (HTTP/network/auth/rate-limit/model missing/timeout): ① if the custom endpoint fails, the review retries **once** on the session's own model (the log line is tagged `⚠️已回退主模型`, "fell back to the main model", in the host log, the review log and the status panel); ② if the final attempt then dies on an endpoint-class error or a detail-less `killed`, it retries up to `reviewRetryCount` times with `reviewRetryDelayMs` backoff — a model connection blip no longer loses the review. Tool-layer errors are never retried
 - **reviewTimeoutMs** — review subagent budget (default 15 min)
 - **reviewRetryCount** — extra retries when the final review attempt dies on endpoint/model-layer failures (connection reset, HTTP errors, timeouts) or a detail-less `killed`; `0` disables retrying. Tool-layer errors are never retried. Default 1
 - **reviewRetryDelayMs** — backoff base for retries, n-th retry waits `base × n` ms (default 5000)
@@ -144,47 +144,60 @@ node test/smoke.mjs         # module/tool/whitelist smoke
 node test/client-smoke.mjs  # client bundle smoke (real component-tree execution)
 ```
 
-`docs/EVIDENCE.md` records the isolated-instance install/start/E2E run (disposable `DSH_HOME`, no deployed instance touched); `docs/AUDIT.md` records the audit rounds.
+All tests run inside a disposable `DSH_HOME`; no deployed instance is touched.
 
-## dsh 0.2.1-rc.2 适配结论
+## dsh 0.2.1-rc.2 compatibility notes
 
-对桌面端 `D:\DeepSeek Harness\`（`FileVersion 0.2.1-rc.2`）做了 asar 解包源码比对 +
-真机验证。**0.2.1 是破坏性变更密集的一版**，光过兼容闸不够：
+Verified against the DSH `0.2.1-rc.2` desktop runtime by comparing against its unpacked
+asar sources and by exercising the plugin end-to-end. **0.2.1 packs several breaking
+changes** — clearing the compatibility gate is not enough on its own:
 
-- **兼容闸只是入场券**：`dsh-subagent` 的包根**移除了 `settleRun` 导出**
-  （只剩 `settleRunResult`，实现搬进 `lib/types/run-settlement.js` 但无 `exports` 子路径可达）。
-  顶层 `import { settleRun }` 在 **ESM 链接期**抛 SyntaxError → `apply()` 从不执行 →
-  插件**整个失效**，而宿主只打一行 warning。修法：内联 `settleRun`（`src/run-settlement.js`），
-  与宿主语义逐条对齐。
-- **`subagents.start()` 被移除**：改为 `startActivation(spec)`（spec 多一层 `request`）。
-  按「方法在不在」运行时分叉，不赌版本号。注意 `startActivation` 的 `signal`
-  **只覆盖 admission**，超时必须显式 `dispose()`，否则评审卡到 15 分钟自超时。
-- **工具白名单从 `request` 层搬到 Agent Preset 层**：`startLocal` 只写
-  `composition: { agentPreset }`，本地起的子代理拿不到 `request.toolFilter`；
-  而 `dsh-tool-subagent` 对 `config.toolFilter` 直接抛错并指向 preset。
-  本插件因此声明了一个内部 preset（`skill-curator-review`），内挂
-  `src/preset-guard.js` 在子代理自己的 scope 上调 `tools.restrict({ allow })`。
-- **preset 守卫必须等就绪标记**（真机事故，详见 `docs/AUDIT.md` 第八轮）：
-  `restrict()` 用 `view(scope).restrictableNames` 校验名字，而它**只收继承面**；
-  profile 各行由 `Promise.all` 并发创建，preset 行只 inject `tools` 而本插件还要等
-  `settings` → preset 抢跑，那一刻工具还没注册 → 抛错 → registry 把 `record.broken`
-  **写死**（"A mount failure is final"），preset 永久 broken，而 Loader 行**照样显示 active**。
-  修法：本插件注册完工具后 `ctx.provide(TOOLS_READY_SERVICE, …)`，guard 用 `inject` 等它。
-- **`LlmAdapter` 基类新增 `imageRequestTarget`**：鸭子对象缺它必 TypeError
-  （与 `imageRequestPricing` 同源），守护测试当场抓到。
-- **闸只读 `peerDependencies`**：判定函数（`dsh-app-boot` 的
-  `evaluatePluginCompatibility`）只遍历 `peerDependencies` 里 `@deepseek-ai/dsh*` 的条目，
-  **从不读 `dsh.engines.dsh`**（全树 grep 零消费者）。两者必须逐字一致，测试已守护。
-- **两种 semver 模式**：宿主闸用 `includePrerelease: true`，此时「预发布可见性」规则被绕过，
-  于是**上界自身的预发布也被放行**（`<0.1.8` 放行 `0.1.8-rc.1`、`<0.3.0` 放行 `0.3.0-alpha.0`）；
-  严格模式（pnpm 安装期）会拒绝它们。所以上界拦的是**正式版**，不是预发布。
-  若要连预发布一起拒，上界须写成 `<0.3.0-0`。
-- **`set_plugin` 重挂不一定生效**：若某个包的 `realDir` 变了（例如刚跑过 `pnpm install`），
-  `ResolutionRouter.replace()` 抛 `ResolutionRestartRequired` → 返回
-  `restart-required / restartReason: "package-moved"`。此时**必须重启 dsh**；
-  而 preset 的 broken 是写死的，重挂也救不回来。
-- **凭证细节**：详细取证、改动清单、测试结果与诚实缺口见 `docs/AUDIT.md`（第七、八轮）。
-
+- **The gate is only the entry ticket.** `dsh-subagent` **no longer exports `settleRun`**
+  from its package root (only `settleRunResult`; the implementation moved into
+  `lib/types/run-settlement.js` but is not reachable through the `exports` map).
+  A top-level `import { settleRun }` throws a `SyntaxError` at **ESM link time**, so
+  `apply()` never runs and the **entire plugin silently dies** — the host only logs a
+  single warning. Fix: inline `settleRun` (`src/run-settlement.js`), aligned statement
+  by statement with the host's semantics.
+- **`subagents.start()` was removed** in favour of `startActivation(spec)` (whose spec
+  carries an extra `request` layer). Branch at runtime on "is the method present" rather
+  than betting on a version number. Note that `startActivation`'s `signal` **covers
+  admission only** — a timeout must `dispose()` explicitly or the review hangs until the
+  built-in 15-minute self-timeout.
+- **The tool whitelist moved from the `request` layer to the Agent Preset layer.**
+  `startLocal` only writes `composition: { agentPreset }`, so locally spawned subagents
+  never see `request.toolFilter`; meanwhile `dsh-tool-subagent` throws outright on
+  `config.toolFilter` and points you at a preset. The plugin therefore declares its own
+  internal preset (`skill-curator-review`) mounting `src/preset-guard.js`, which calls
+  `tools.restrict({ allow })` inside the subagent's own scope.
+- **The preset guard must wait for a readiness marker.** `restrict()` validates names
+  through `view(scope).restrictableNames`, which **only accepts the inheritance
+  surface**; profile entries are created concurrently by `Promise.all`, and the preset
+  row injects only `tools` while this plugin also waits on `settings` — so the preset
+  races ahead, the tools are not registered yet, the call throws, and the registry writes
+  `record.broken` **permanently** ("A mount failure is final"). The preset stays broken
+  forever while the Loader row still shows `active`. Fix: the plugin calls
+  `ctx.provide(TOOLS_READY_SERVICE, …)` after registering its tools, and the guard waits
+  for it via `inject`.
+- **The `LlmAdapter` base class gained `imageRequestTarget`.** A duck-typed adapter
+  missing it throws a `TypeError` (same origin as `imageRequestPricing`); a guard test
+  caught this immediately.
+- **The gate reads `peerDependencies` only.** The decision function
+  (`evaluatePluginCompatibility` in `dsh-app-boot`) walks only the `@deepseek-ai/dsh*`
+  entries under `peerDependencies` and **never reads `dsh.engines.dsh`** (zero consumers
+  across the whole tree). The two must stay literally identical, which the tests enforce.
+- **Two different semver modes.** The host gate runs with `includePrerelease: true`,
+  which bypasses the prerelease-visibility rule, so **prereleases of the upper bound
+  itself are admitted too** (`<0.1.8` admits `0.1.8-rc.1`, `<0.3.0` admits
+  `0.3.0-alpha.0`). Strict mode (used at pnpm install time) rejects them. The upper bound
+  therefore blocks **stable releases**, not prereleases; to reject prereleases as well,
+  write it as `<0.3.0-0`.
+- **`set_plugin` re-mounting does not always take effect.** If a package's `realDir`
+  changed (for example right after `pnpm install`), `ResolutionRouter.replace()` throws
+  `ResolutionRestartRequired` and returns
+  `restart-required / restartReason: "package-moved"`. A dsh restart is then
+  **mandatory** — and because a broken preset is written down permanently, re-mounting
+  will not rescue it either.
 
 ## License
 
