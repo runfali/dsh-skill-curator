@@ -5,3 +5,13 @@ node_modules/
 graphify-out/
 .code-review-graph/
 package-lock.json
+
+# 内部文档，不对外发布（保留在本机，仅不进仓库 / npm 包）
+#
+# 为什么用 .gitignore 而不是删文件：这些记录对维护者有价值，但含真机事故取证、
+# 内部环境路径与实施计划，不适合出现在公开仓库。git 已忽略后，本地仍可查阅。
+# 注意：只加 .gitignore 挡不住 `npm publish` —— package.json 的 files 里不能有 docs 通配，
+# 见那里的逐文件清单。
+docs/AUDIT.md
+docs/EVIDENCE.md
+docs/UPGRADE-PLAN-2026-10-20.md

@@ -14,7 +14,8 @@
     "src",
     "lib",
     "cordis.patch.yml",
-    "docs",
+    "docs/COMPARISON.md",
+    "docs/DSH-0.2.0-ADAPTATION.md",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"
