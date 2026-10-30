@@ -218,19 +218,34 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       // 否则一次 readdir 失败就会清空所有 firstSeenAt/lastUsedAt（/status 每 30s
       // 轮询一次，随时可能撞上），目录恢复后重新登记为「首见=当下」，历史不可恢复。
       const diskKnown = Object.values(state.skills).filter((r) => r.origin === 'disk' && r.state !== 'archived').length
+      // 空列表触发的清理必须格外小心：三种情况长得一模一样，但只有一种是真的删光了。
+      let emptyRootPrune = false
       if (list.length === 0 && diskKnown > 0) {
-        // 区分两种"空"：
-        //   - 技能根读不到（readdir 抛错）→ 绝不能清表（会丢全部 firstSeenAt/lastUsedAt）
-        //   - 用户真的删光了技能库 → 必须正常清理，否则面板永远报已不存在的技能
-        let readable = true
-        try { readdirSync(root) } catch { readable = false }
-        if (!readable) {
+        let entries = null
+        try { entries = readdirSync(root, { withFileTypes: true }) } catch { entries = null }
+        if (entries === null) {
+          // ① 根读不到（权限/挂载/DSH_HOME 指错）→ 绝不能清表
           if (!emptyRootWarned) {
             emptyRootWarned = true
-            log('warn', `skill-curator: skill root unreadable while ${diskKnown} skills are known; skip pruning (warned once)`)
+            log('warn', `skill-curator: skill root unreadable (${root}) while ${diskKnown} skills are known; skip pruning (warned once)`)
           }
           return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
         }
+        // ② 根里还有**任何非点条目**，却一个技能都没认出来：判据不完整 ——
+        //    SKILL.md 读不到（云同步脱水/权限/原子写窗口）、技能目录是 junction/软链
+        //    （Dirent.isDirectory() 为 false）、或 skillsRoot 指到了别的目录。
+        //    「可读」不能证明「删光了」，此时清表就是不可逆的数据损失。
+        //    只排除点条目：技能库常是 git 工作树，只剩 .git 时仍应算「真删光」。
+        const survivorCount = entries.filter((e) => !e.name.startsWith('.')).length
+        if (survivorCount > 0) {
+          if (!emptyRootWarned) {
+            emptyRootWarned = true
+            log('warn', `skill-curator: root ${root} has ${survivorCount} entr(ies) but 0 recognized skills while ${diskKnown} known; skip pruning (warned once)`)
+          }
+          return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
+        }
+        // ③ 根里连一个目录都没有 = 用户真删光了 → 正常清理（但仍先写 .bak）
+        emptyRootPrune = true
       }
 
       let seeded = 0
@@ -273,8 +288,10 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       for (const [name, rec] of Object.entries(state.skills)) {
         if (seen.has(name)) continue
         if (rec.origin !== 'runtime' || rec.pinned || rec.state === 'archived') continue
-        const last = Number.isFinite(rec.lastUsedAt) && rec.lastUsedAt > 0 ? rec.lastUsedAt : rec.firstSeenAt
-        if (!Number.isFinite(last)) continue
+        // 用同一个 anchorOf（第 4 处拷贝曾把 0 当 1970，进而把记录**删掉** —— 比误判
+        // 更不可逆）。锚点无效就不判过期。
+        const last = anchorOf(rec)
+        if (last === null) continue
         if (Date.now() - last > RUNTIME_TTL_MS) {
           delete state.skills[name]
           expired += 1
@@ -294,7 +311,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         return !seen.has(name) && rec.state !== 'archived'
       })
       let dropped = expired
-      if (toDrop.length >= 5) {
+      // 空列表触发的清理无条件留快照：这类误判往往是「指错根 / 读不到」，一次就能清空历史。
+      if (toDrop.length >= 5 || (emptyRootPrune && toDrop.length > 0)) {
         try {
           copyFileSync(path, `${path}.bak`)
           log('warn', `skill-curator: pruning ${toDrop.length} skills; snapshot saved to ${path}.bak`)

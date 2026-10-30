@@ -47,7 +47,13 @@ const renderedTags = []
 let renderedText = []
 // usage 分组 <ul hidden> 的可见性快照（折叠契约只能从这里断言，见 .SCc_lcUsage）
 let lcUsageHidden = []
+// 渲染过程中遇到的 <button> props（用来真的点一下「展开」）
+let renderedButtons = []
+// 每次顶层渲染前执行（递归不执行）。用可赋值变量而不是直接引用后定义的 const，
+// 否则在 TDZ 里访问会抛 ReferenceError。
+let beforeRender = () => {}
 function renderTree(node) {
+  if (renderDepth === 0) beforeRender()
   if (node === null || node === undefined) return
   if (Array.isArray(node)) { for (const c of node) renderTree(c); return }
   if (typeof node === 'string' || typeof node === 'number') { renderedText.push(String(node)); return }
@@ -60,6 +66,7 @@ function renderTree(node) {
     return
   }
   if (typeof node.type === 'string') renderedTags.push(node.type)
+  if (node.type === 'button' && node.props) renderedButtons.push(node.props)
   if (node.props && typeof node.props.className === 'string' && node.props.className.includes('SCc_lcUsage')) {
     lcUsageHidden.push(node.props.hidden)
   }
@@ -194,19 +201,27 @@ const expanded = makeElement(Component, {
 })
 // 折叠态由组件内部 useState 控制（reactStubOpen 把首个 useState 顶成 true），
 // 这里不再往 props 上塞 open（那是死代码，组件根本不读）。
-let controlState = null
-// 只把**第一个** useState 顶成 true（设置卡/面板的折叠开关），其余一律返回真实初值。
+// 只把**第一个** useState 顶成 true（设置卡/面板的折叠开关），其余给真实初值。
 // 旧版对所有 hook 都返回 true：busy/restoreBusy/notice 全是 true，整场卡在
-// 「归档中…/恢复中…」，交互分支等于从没被测过（审计发现，2026-10-30）。
+// 「归档中…/恢复中…」，交互分支等于从没被测过。
+//
+// setter 必须**真的能写**：上一版是空函数，于是「展开」点不动、openUsage 永远是 {}，
+// 生产分支（点击展开 → 列表可见）只能靠 __debug 注入绕过 —— 把 open 写成恒 false
+// 也全绿（2026-10-30 复审抓到的假绿）。状态按 hook 序号存，顶层渲染前清索引。
 let openStubCalls = 0
+const openStubState = new Map()
+const resetOpenStub = () => { openStubCalls = 0 }
+beforeRender = resetOpenStub
 const hookSeq = []
 const reactStubOpen = {
   useState: (init) => {
-    openStubCalls += 1
+    const idx = openStubCalls++
     hookSeq.push('useState')
-    const value = openStubCalls === 1 ? true : (typeof init === 'function' ? init() : init)
-    if (openStubCalls === 1) controlState = value
-    return [value, () => {}]
+    if (idx === 0) return [true, () => {}]
+    if (!openStubState.has(idx)) openStubState.set(idx, typeof init === 'function' ? init() : init)
+    return [openStubState.get(idx), (next) => {
+      openStubState.set(idx, typeof next === 'function' ? next(openStubState.get(idx)) : next)
+    }]
   },
   useEffect: () => { hookSeq.push('useEffect') },
   useSyncExternalStore: (s, g) => { hookSeq.push('useSyncExternalStore'); return g() }
@@ -219,10 +234,6 @@ const sandboxRequire2 = (name) => {
 const loaderStore2 = {}
 vm.runInContext(bundleSource, (() => { const w = { __ModuleLoader__: { load(e) { loaderStore2.entry = e } } }; w.window = w; vm.createContext(w); return w })(), { filename: 'lib/client.js' })
 const captured2 = loaderStore2.entry.factory.call(null, sandboxRequire2)
-const injected2 = (() => {
-  const r = { slots: { inject(name, gen) { registered.slots.length = 0; const reg = gen().next().value; registered.slots.push(reg) } } }
-  return r
-})()
 // 展开态组件的槽位注册需要完整 ctx——复用第一个 ctx 但 replace slot 捕获
 const ctxStub2 = {
   effect: (fn) => { fn(); return () => {} },
@@ -339,7 +350,7 @@ ok('save flow writes user layer')
   globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve(fakeStatus) })
   try {
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true } }))
     const text = renderedText.join(' | ')
     assert.ok(text.includes('技能生命周期'), 'panel title rendered through locale')
     // 关键：不能出现未解析的 locale key（渲染时 t() 必须命中字典）
@@ -352,6 +363,8 @@ ok('save flow writes user layer')
     assert.ok(text.includes('never-a'), 'never-used name rendered')
     assert.ok(text.includes('old-b · 40 天'), 'idle name + age rendered')
     assert.ok(text.includes('old-c · 120 天'), 'archiveable name + age rendered')
+    // 默认（14/45，archive >= stale）必须走「子集」文案；写死 inverted 会红
+    assert.ok(text.includes('是它的子集'), 'normal thresholds use the subset copy')
     // 旧的「久未用」状态桶必须消失（与年龄分组重复，会给出两个互相矛盾的数字）
     assert.ok(!text.includes('久未用'), 'legacy stale bucket removed from the panel')
     // 归档候选与「够格归档」分组同源：夹具里 wouldArchive 是状态机旧值（alpha-skill），
@@ -372,16 +385,16 @@ ok('save flow writes user layer')
 
     // 面板 hooks 顺序：detail 与 summary 必须调用完全相同的序列（early-return 之前）
     hookSeq.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true } }))
     const panelDetailSeq = hookSeq.join(',')
     hookSeq.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: fakeStatus, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: fakeStatus, open: true } }))
     assert.equal(hookSeq.join(','), panelDetailSeq, 'panel must call the same hook sequence in both views')
     ok('lifecycle panel hook sequence stable across views')
 
     // 列表页一行摘要：不点进去也能看到三个数
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: fakeStatus, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: fakeStatus, open: true } }))
     const summary = renderedText.join(' ')
     assert.ok(summary.includes('从未用 1'), 'summary line shows never-used count')
     assert.ok(summary.includes('14 天未用 1'), 'summary line shows idle count with setting threshold')
@@ -392,7 +405,7 @@ ok('save flow writes user layer')
     const legacy = JSON.parse(JSON.stringify(fakeStatus))
     delete legacy.lifecycle.usage.staleDays
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: legacy, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: legacy, open: true } }))
     const legacyText = renderedText.join(' ')
     assert.ok(!legacyText.includes('undefined'), 'bad status must not leak undefined into copy')
     assert.ok(legacyText.includes('够格归档'), 'falls back to the legacy one-line summary')
@@ -400,7 +413,7 @@ ok('save flow writes user layer')
     // 详情视图同样不能泄 undefined（守卫原先只加在 summary 一行）
     renderedText.length = 0
     lcUsageHidden = []
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: legacy, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: legacy, open: true } }))
     const legacyDetail = renderedText.join(' | ')
     assert.ok(!legacyDetail.includes('undefined'), 'detail view must not leak undefined either')
     assert.ok(!legacyDetail.includes(' 天未用（'), 'no empty-threshold group title')
@@ -416,7 +429,7 @@ ok('save flow writes user layer')
     assert.equal(renderedText.join(''), '加载中…', 'loading state has its own copy')
 
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: { error: true }, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: { error: true }, open: true } }))
     assert.equal(renderedText.join(''), '状态获取失败', 'error state is not reported as "nothing to do"')
     ok('lifecycle summary distinguishes loading / error / idle')
 
@@ -424,17 +437,34 @@ ok('save flow writes user layer')
     // 没有这条，hidden: true（永远收起）也能全绿 —— 复审抓到的假绿。
     renderedText.length = 0
     lcUsageHidden = []
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true, openUsage: { idle: true } } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true, openUsage: { idle: true } } }))
     assert.deepEqual(lcUsageHidden, [true, false, true], 'only the idle group is expanded')
     assert.ok(renderedText.join(' | ').includes('收起'), 'expanded group offers collapse')
     ok('usage group can actually expand (hidden=false)')
+
+    // 生产分支（不经 __debug.openUsage）：真的点一下「展开」，setter 写状态，
+    // 重渲染后该组可见。上一版 setter 是空函数，把 open 写成恒 false 也全绿。
+    openStubState.clear()
+    renderedButtons = []
+    lcUsageHidden = []
+    const liveProps = { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true } }
+    renderTree(makeElement(lifecycleComponent, liveProps))
+    assert.deepEqual(lcUsageHidden, [true, true, true], '前置：三组都收起')
+    const expandBtn = renderedButtons.find((b) => b.children === '展开')
+    assert.ok(expandBtn, 'expand button rendered')
+    expandBtn.onClick()
+    lcUsageHidden = []
+    renderTree(makeElement(lifecycleComponent, liveProps))
+    assert.deepEqual(lcUsageHidden, [false, true, true], '点击后第一组真的展开了（生产分支）')
+    openStubState.clear() // 复位，后续用例按"全部收起"的初始态断言
+    ok('clicking expand really opens the list (production path)')
 
     // 阈值倒置（archive < stale）：「是它的子集」是假话，必须换文案
     const inverted = JSON.parse(JSON.stringify(fakeStatus))
     inverted.lifecycle.usage.staleDays = 90
     inverted.lifecycle.usage.archiveDays = 30
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: inverted, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: inverted, open: true } }))
     const invertedText = renderedText.join(' | ')
     assert.ok(invertedText.includes('90 天未用（1）') && invertedText.includes('30 天够格归档（1）'), 'thresholds rendered from status')
     assert.ok(!invertedText.includes('是它的子集'), 'inverted thresholds must not claim a subset')
@@ -446,7 +476,7 @@ ok('save flow writes user layer')
     emptyBucket.lifecycle.usage.archiveable = []
     renderedText.length = 0
     lcUsageHidden = []
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: emptyBucket, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: emptyBucket, open: true } }))
     const emptyText = renderedText.join(' | ')
     assert.equal(lcUsageHidden.length, 2, 'empty bucket renders no list')
     assert.equal((emptyText.match(/展开/g) || []).length, 2, 'empty bucket renders no expand button')
@@ -458,7 +488,7 @@ ok('save flow writes user layer')
     badType.lifecycle.usage.staleDays = '14'
     renderedText.length = 0
     lcUsageHidden = []
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: badType, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: badType, open: true } }))
     const badTypeText = renderedText.join(' | ')
     assert.equal(lcUsageHidden.length, 2, 'string threshold drops the idle group instead of coercing')
     assert.ok(!badTypeText.includes('14 天未用'), 'no coerced threshold in copy')
@@ -466,10 +496,12 @@ ok('save flow writes user layer')
 
     // 详情页头部：加载中 / 失败 两条新文案（之前只有 summary 分支有用例）
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { open: true } }))
-    assert.ok(renderedText.join(' | ').includes('加载中…'), 'detail header shows loading copy')
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, open: true } }))
+    const loadingText = renderedText.join(' | ')
+    assert.ok(loadingText.includes('加载中…'), 'detail header shows loading copy')
+    assert.ok(!loadingText.includes('状态获取失败'), 'loading must not be reported as an error (header/body must agree)')
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: { error: true }, open: true } }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: { error: true }, open: true } }))
     assert.ok(renderedText.join(' | ').includes('状态获取失败'), 'detail header shows error copy')
     ok('detail header distinguishes loading / error')
   } finally {

@@ -98,6 +98,15 @@ test('--write 只增不减：已有更晚的时间戳不被回退', () => {
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).skills.alpha.lastUsedAt, ts + day, '不得回退到更早的时间')
 })
 
+test('参数缺值必须报错退出，不能把下一个开关当值', () => {
+  fixture()
+  for (const args of [['--home'], ['--port', '--write']]) {
+    const res = spawnSync(process.execPath, [join(REPO, 'scripts', 'backfill-usage.mjs'), ...args], { encoding: 'utf8' })
+    assert.equal(res.status, 2, args.join(' ') + ' 必须 exit 2')
+    assert.match(res.stderr, /需要一个/)
+  }
+})
+
 test('状态表里出现 __proto__ 条目时必须跳过（不许把回填写到原型上）', () => {
   const { home, file } = fixture()
   // 手改/旧版本写坏的状态表：JSON.parse 会把 "__proto__" 建成**自有属性**

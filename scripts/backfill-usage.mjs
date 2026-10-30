@@ -35,7 +35,12 @@ function parseArgs(argv) {
     if (a === '--write') out.write = true
     else if (a === '--dry-run') out.write = false
     else if (a === '--force') out.force = true
-    else if (a === '--port') out.port = Number(argv[++i]) || 31102
+    else if (a === '--port') {
+      // 与 --home 同一个坑：--port --write 会把开关当端口值，再静默按默认端口跑
+      const raw = argv[++i]
+      if (!raw || raw.startsWith('--') || !/^\d+$/.test(raw)) { console.error('--port 需要一个端口号'); process.exit(2) }
+      out.port = Number(raw)
+    }
     else if (a === '--home') {
       const v = argv[++i]
       // 也挡「把下一个开关当值」：--home --write 以前会把 --write 当目录

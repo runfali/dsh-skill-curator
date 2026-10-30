@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLifecycleStore, DAY_MS } from '../src/lifecycle.js'
@@ -322,8 +322,10 @@ test('markUsed / has 不接受原型魔法名：__proto__ 不得污染 Object.pr
   assert.equal(({}).lastUsedAt, undefined, 'Object.prototype 不得被污染')
   assert.deepEqual(Object.keys(store.snapshot().skills), [], '首字符是下划线的名字一条都不许登记')
 
-  // 'constructor' 是合法形状的名字：defineProperty 会建**自有属性**，不会写到原型上。
-  // 这条断言防的是「换成 obj[name]=value 写法」的回归（那种写法会改原型）。
+  // 'constructor' 是合法形状的名字。这里真正守住的是 syncWith 里那句
+  // Object.hasOwn(state.skills, name)：若退回 state.skills[name] 直接取，
+  // 'constructor' 会命中原型上的 Object 构造函数，origin='disk' 被写到**全局 Object** 上，
+  // 而且这个技能根本不会被登记（2026-10-30 复审实测）。
   store.markUsed('constructor', { now: Date.now() })
   assert.equal(Object.hasOwn(store.snapshot().skills, 'constructor'), true, '合法名字可以登记')
   assert.equal(Object.prototype.constructor, Object, 'Object.prototype 不得被改写')
@@ -350,15 +352,40 @@ test('syncWith：技能根**读不到**时不得清空已有记录', () => {
 })
 
 test('syncWith：技能库**真的**被删光时照常清理（不能永久留僵尸）', () => {
-  const { root, store } = fixture()
+  const { root, store, file } = fixture()
   addSkill(root, 'a-skill')
   addSkill(root, 'b-skill')
   store.syncWith(root)
-  // 根可读、里面确实空了 —— 这是用户手删，必须清理，否则面板永远报不存在的技能
+  // 真把目录删掉（不是只传空名单）：目录还在但认不出来 ≠ 删光，必须区分
+  rmSync(join(root, 'a-skill'), { recursive: true })
+  rmSync(join(root, 'b-skill'), { recursive: true })
   const res = store.syncWith(root, [])
-  assert.equal(res.skippedEmpty, undefined, '可读的空库不是"读不到"')
+  assert.equal(res.skippedEmpty, undefined, '空目录不是"读不到/扫描退化"')
   assert.equal(res.dropped, 2, '真空库必须清理僵尸记录')
   assert.deepEqual(Object.keys(store.snapshot().skills), [])
+  assert.ok(existsSync(file + '.bak'), '空列表触发的清理必须无条件留快照（哪怕只删 2 条）')
+})
+
+test('syncWith：根里还有目录但认不出技能（SKILL.md 读不到）时不得清表', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'alpha')
+  addSkill(root, 'beta')
+  store.syncWith(root)
+  // 模拟云同步脱水 / 权限变更：目录都在，只是 listSkills 认不出来（传空名单）
+  const res = store.syncWith(root, [])
+  assert.equal(res.dropped, 0, '目录还在就绝不能清表')
+  assert.equal(res.skippedEmpty, true)
+  assert.deepEqual(Object.keys(store.snapshot().skills).sort(), ['alpha', 'beta'])
+})
+
+test('syncWith：只剩 .git 时算真删光（点条目不计入存活）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'alpha')
+  store.syncWith(root)
+  rmSync(join(root, 'alpha'), { recursive: true })
+  mkdirSync(join(root, '.git'), { recursive: true })
+  const res = store.syncWith(root, [])
+  assert.equal(res.dropped, 1, '技能库是 git 工作树，只剩 .git 时应判为真删光')
 })
 
 test('syncWith：长期未命中的 runtime 幽灵记录会被清掉（写错名字不会永久留痕）', () => {
@@ -428,6 +455,24 @@ function seedState(store, skills) {
   }
   store.__replaceForTest({ skills: map, lastPassAt: null })
 }
+
+test('markUsed 的历史时间戳不触发 TimeoutOverflowWarning（delay 必须 clamp）', async () => {
+  // 回填会传几天甚至几个月前的时间戳，now - lastFlushAt 为负 → 旧实现算出巨大的
+  // delay，node 打 TimeoutOverflowWarning 并把 timer 压成 1ms（每条一次，刷屏）。
+  const warnings = []
+  const onWarn = (w) => warnings.push(String(w && w.name) + ': ' + String(w && w.message))
+  process.on('warning', onWarn)
+  try {
+    const { store } = fixture()
+    const now = Date.now()
+    store.markUsed('a-skill', { now })
+    store.markUsed('b-skill', { now: now - 60 * DAY_MS })
+    await new Promise((r) => setTimeout(r, 60))
+    assert.deepEqual(warnings, [], '历史时间戳不得触发 timer 溢出告警')
+  } finally {
+    process.off('warning', onWarn)
+  }
+})
 
 test('usageReport：三个桶的天数口径与包含关系', () => {
   const { store } = fixture()
