@@ -1,0 +1,8 @@
+# Windows 批处理必须是 CRLF：cmd.exe 遇到 LF + 多字节注释会把注释行拆成命令，
+# 双击运行时 cd 那一行会被吞掉（2026-10-30 审计实测，P1）。
+# 仓库 core.autocrlf=input：不加这条规则时索引里存 LF，别人 clone 下来就是坏的。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# shell 脚本反过来，必须是 LF（CRLF 会让 bash 报 $'\r': command not found）
+*.sh text eol=lf
