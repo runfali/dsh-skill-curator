@@ -110,7 +110,7 @@ Windows and state:
 - **pinning** — pin a skill via `skill-library-lifecycle` (there is no settings field for it) and it is exempt forever
 - Archived skills move to `<DSH_HOME>/skill-curator/archived/<name>/` — **outside** the library, so the host does not discover them, and `restore` brings them back
 
-The panel (Settings → Skill lifecycle) shows three counts, each expandable to names and ages: never used, unused for N+ days (`staleDays`), archiveable at M+ days (`archiveDays`). The last two are derived views — the first is a subset of the second, and everything is computed on read.
+The panel (Settings → Skill lifecycle) shows two collapsible sections, the whole header row clickable and the count in a pill: unused for N+ days (`staleDays`, rows show name + age) and archiveable at M+ days (`archiveDays`, checkbox rows with one-click archive). Both are derived views computed on read, with `M-day archiveable` a subset of `N-day unused` (the copy switches when the thresholds are inverted). "Never used" is no longer its own group: the day count would just be the registration age, and past the threshold those skills land in `N-day unused` anyway.
 
 Rebuild historical usage (loads from before the plugin existed, and from subagent sessions) with the one-shot script:
 

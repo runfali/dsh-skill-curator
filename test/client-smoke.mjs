@@ -47,6 +47,8 @@ const renderedTags = []
 let renderedText = []
 // usage 分组 <ul hidden> 的可见性快照（折叠契约只能从这里断言，见 .SCc_lcUsage）
 let lcUsageHidden = []
+// 分区数量胶囊里的数字（按渲染顺序）
+let lcCounts = []
 // 渲染过程中遇到的 <button> props（用来真的点一下「展开」）
 let renderedButtons = []
 // 渲染前重置 hook 序号。注意：renderDepth===0 对**同一顶层的每个宿主子节点**都成立，
@@ -71,6 +73,9 @@ function renderTree(node) {
   if (node.type === 'button' && node.props) renderedButtons.push(node.props)
   if (node.props && typeof node.props.className === 'string' && node.props.className.includes('SCc_lcUsage')) {
     lcUsageHidden.push(node.props.hidden)
+  }
+  if (node.props && typeof node.props.className === 'string' && node.props.className.includes('SCc_lcCount')) {
+    lcCounts.push(String(node.props.children))
   }
   if (Array.isArray(node.children)) for (const c of node.children) renderTree(c)
   if (node.props && node.props.children !== undefined) renderTree(node.props.children)
@@ -352,35 +357,35 @@ ok('save flow writes user layer')
   globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve(fakeStatus) })
   try {
     renderedText.length = 0
+    lcCounts = []
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true } }))
     const text = renderedText.join(' | ')
     assert.ok(text.includes('技能生命周期'), 'panel title rendered through locale')
-    // 关键：不能出现未解析的 locale key（渲染时 t() 必须命中字典）
-    assert.ok(!/\blc\.[a-zA-Z]+\b/.test(text), 'no unresolved locale keys in the render tree')
+    assert.ok(!/\blc\.[a-zA-Z.]+\b/.test(text), 'no unresolved locale keys in the render tree')
 
-    // 三组年龄数字：数量、阈值（必须来自 usage，不能写死 30/90）、名单与天数
-    assert.ok(text.includes('从未使用（1）'), 'never-used group with count')
-    assert.ok(text.includes('14 天未用（1）'), 'idle group bound to settings staleDays (14)')
-    assert.ok(text.includes('45 天够格归档（1）'), 'archiveable group bound to settings archiveDays (45)')
-    assert.ok(text.includes('never-a'), 'never-used name rendered')
-    assert.ok(text.includes('old-b · 40 天'), 'idle name + age rendered')
-    assert.ok(text.includes('old-c · 120 天'), 'archiveable name + age rendered')
-    // 默认（14/45，archive >= stale）必须走「子集」文案；写死 inverted 会红
+    // 只保留两组年龄视图（从未使用已按产品决定移除）
+    assert.ok(text.includes('14 天未用'), 'idle section bound to settings staleDays (14)')
+    assert.ok(text.includes('45 天够格归档'), 'archiveable section bound to settings archiveDays (45)')
+    // 说明文案里仍会提到「从未使用」这个概念（30 天未用包含超龄的从不使用），
+    // 所以只断言「没有这个分区标题」，不是整段文本不含该词
+    assert.ok(!text.includes('从未使用（'), 'never-used section removed from the panel')
+    assert.ok(!text.includes('never-a'), 'never-used names not rendered')
+    // 名单两列：名字与天数分开渲染
+    assert.ok(text.includes('old-b') && text.includes('40 天'), 'idle row: name + age')
+    assert.ok(text.includes('old-c') && text.includes('120 天'), 'archive row: name + age')
     assert.ok(text.includes('是它的子集'), 'normal thresholds use the subset copy')
-    // 旧的「久未用」状态桶必须消失（与年龄分组重复，会给出两个互相矛盾的数字）
     assert.ok(!text.includes('久未用'), 'legacy stale bucket removed from the panel')
-    // 归档候选与「够格归档」分组同源：夹具里 wouldArchive 是状态机旧值（alpha-skill），
-    // 现算的 usage.archiveable 是 old-c —— 面板必须用后者，否则两处数字互相矛盾。
-    assert.ok(text.includes('old-c'), 'archive list uses live usage.archiveable')
+    // 归档候选与「够格归档」分区同源（现算 usage.archiveable，不用状态机快照）
     assert.ok(!text.includes('alpha-skill'), 'stale wouldArchive must not drive the archive list')
-    ok('lifecycle panel renders usage groups (counts + names + ages)')
+    // 数量胶囊：idle=1 / archiveable=1 / archived=2
+    assert.deepEqual(lcCounts, ['1', '1', '2'], 'section count pills')
+    ok('lifecycle panel renders two age sections with counts and ages')
 
-    // 折叠契约的第二半：CSS 规则在，但 JSX 真得绑了 hidden。删掉 hidden: !open
-    // 后名字仍会出现在渲染树里（renderTree 不读 props.hidden），所以必须直接看属性。
-    assert.equal(lcUsageHidden.length, 3, 'three usage lists rendered (never / idle / archiveable)')
-    assert.ok(lcUsageHidden.every((v) => v === true), 'usage lists are collapsed by default')
+    // 折叠契约：CSS 规则在，JSX 也得真绑 hidden
+    assert.equal(lcUsageHidden.length, 2, 'two collapsible usage lists (idle / archiveable)')
+    assert.ok(lcUsageHidden.every((v) => v === true), 'sections are collapsed by default')
 
-    // 静止态的按钮文案：busy 必须是 false（旧夹具恒 true，永远显示「归档中…」）
+    // 静止态按钮：busy 必须是 false（旧夹具恒 true，永远显示「归档中…」）
     assert.ok(text.includes('归档选中（0）'), 'archive button reflects idle state + selection count')
     assert.ok(text.includes('恢复选中（0）'), 'restore button reflects idle state')
     assert.ok(!text.includes('归档中…') && !text.includes('恢复中…'), 'buttons must not be stuck in busy state')
@@ -394,16 +399,16 @@ ok('save flow writes user layer')
     assert.equal(hookSeq.join(','), panelDetailSeq, 'panel must call the same hook sequence in both views')
     ok('lifecycle panel hook sequence stable across views')
 
-    // 列表页一行摘要：不点进去也能看到三个数
+    // 列表页一行摘要：两个数（不再有「从未用」）
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: fakeStatus, open: true } }))
     const summary = renderedText.join(' ')
-    assert.ok(summary.includes('从未用 1'), 'summary line shows never-used count')
     assert.ok(summary.includes('14 天未用 1'), 'summary line shows idle count with setting threshold')
     assert.ok(summary.includes('45 天够格 1'), 'summary line shows archiveable count')
-    ok('lifecycle summary line shows three counts')
+    assert.ok(!summary.includes('从未用'), 'summary line no longer mentions never-used')
+    ok('lifecycle summary line shows two counts')
 
-    // 半旧版 status（有桶没阈值）必须退回旧摘要，而不是渲染 "undefined 天未用"
+    // 半旧版 status（缺 staleDays）：摘要退回旧文案，详情只渲染 archiveable，全程无 undefined
     const legacy = JSON.parse(JSON.stringify(fakeStatus))
     delete legacy.lifecycle.usage.staleDays
     renderedText.length = 0
@@ -411,55 +416,46 @@ ok('save flow writes user layer')
     const legacyText = renderedText.join(' ')
     assert.ok(!legacyText.includes('undefined'), 'bad status must not leak undefined into copy')
     assert.ok(legacyText.includes('够格归档'), 'falls back to the legacy one-line summary')
-
-    // 详情视图同样不能泄 undefined（守卫原先只加在 summary 一行）
     renderedText.length = 0
     lcUsageHidden = []
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: legacy, open: true } }))
     const legacyDetail = renderedText.join(' | ')
     assert.ok(!legacyDetail.includes('undefined'), 'detail view must not leak undefined either')
-    assert.ok(!legacyDetail.includes(' 天未用（'), 'no empty-threshold group title')
-    // 缺 staleDays：never-used（无阈值）与 archiveable（自带 45）照常显示，
-    // 只有 idle 那一组没有阈值可写 → 整组不渲染（不是渲染成 "undefined 天"）
-    assert.equal(lcUsageHidden.length, 2, 'groups without a threshold are dropped, not rendered with undefined')
+    assert.ok(!legacyDetail.includes(' 天未用'), 'no empty-threshold section title')
+    assert.equal(lcUsageHidden.length, 1, 'only the archiveable section survives a half-old payload')
     ok('lifecycle panel degrades on partial status (summary + detail)')
 
-    // 首帧（status 还没回来）与失败（status.error）必须说清楚，
-    // 不能都显示「没有够格归档的技能」——那是谎报平安
+    // 首帧 / 失败必须说清楚，不能都显示「没有够格归档」
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary' }))
     assert.equal(renderedText.join(''), '加载中…', 'loading state has its own copy')
-
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { __smoke: true, status: { error: true }, open: true } }))
     assert.equal(renderedText.join(''), '状态获取失败', 'error state is not reported as "nothing to do"')
     ok('lifecycle summary distinguishes loading / error / idle')
 
-    // 展开态：夹具 setter 是空函数，只能靠 __debug.openUsage 注入。
-    // 没有这条，hidden: true（永远收起）也能全绿 —— 复审抓到的假绿。
+    // 展开态（__debug.openUsage 注入）：只有 idle 那一组展开
     renderedText.length = 0
     lcUsageHidden = []
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true, openUsage: { idle: true } } }))
-    assert.deepEqual(lcUsageHidden, [true, false, true], 'only the idle group is expanded')
-    assert.ok(renderedText.join(' | ').includes('收起'), 'expanded group offers collapse')
-    ok('usage group can actually expand (hidden=false)')
+    assert.deepEqual(lcUsageHidden, [false, true], 'only the idle section is expanded')
+    ok('usage section can actually expand (hidden=false)')
 
-    // 生产分支（不经 __debug.openUsage）：真的点一下「展开」，setter 写状态，
-    // 重渲染后该组可见。上一版 setter 是空函数，把 open 写成恒 false 也全绿。
+    // 生产分支：点第一组的分区头，setter 写状态，重渲染后列表可见
     openStubState.clear()
     renderedButtons = []
     lcUsageHidden = []
     const liveProps = { t: lcDict, __debug: { __smoke: true, status: fakeStatus, open: true } }
     renderTree(makeElement(lifecycleComponent, liveProps))
-    assert.deepEqual(lcUsageHidden, [true, true, true], '前置：三组都收起')
-    const expandBtn = renderedButtons.find((b) => b.children === '展开')
-    assert.ok(expandBtn, 'expand button rendered')
-    expandBtn.onClick()
+    assert.deepEqual(lcUsageHidden, [true, true], '前置：两组都收起')
+    const secHead = renderedButtons.find((b) => b.className === 'SCc_lcSecHead')
+    assert.ok(secHead, 'section header is a real button')
+    secHead.onClick()
     lcUsageHidden = []
     renderTree(makeElement(lifecycleComponent, liveProps))
-    assert.deepEqual(lcUsageHidden, [false, true, true], '点击后第一组真的展开了（生产分支）')
-    openStubState.clear() // 复位，后续用例按"全部收起"的初始态断言
-    ok('clicking expand really opens the list (production path)')
+    assert.deepEqual(lcUsageHidden, [false, true], '点击后第一组真的展开了（生产分支）')
+    openStubState.clear()
+    ok('clicking a section header really opens the list (production path)')
 
     // 阈值倒置（archive < stale）：「是它的子集」是假话，必须换文案
     const inverted = JSON.parse(JSON.stringify(fakeStatus))
@@ -468,35 +464,34 @@ ok('save flow writes user layer')
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: inverted, open: true } }))
     const invertedText = renderedText.join(' | ')
-    assert.ok(invertedText.includes('90 天未用（1）') && invertedText.includes('30 天够格归档（1）'), 'thresholds rendered from status')
+    assert.ok(invertedText.includes('90 天未用') && invertedText.includes('30 天够格归档'), 'thresholds rendered from status')
     assert.ok(!invertedText.includes('是它的子集'), 'inverted thresholds must not claim a subset')
     assert.ok(invertedText.includes('不是'), 'inverted copy explains the relationship')
     ok('inverted thresholds get their own copy')
 
-    // 空桶：不渲染「展开」按钮，也不渲染列表
+    // 空桶：不出列表，给一行浅色说明
     const emptyBucket = JSON.parse(JSON.stringify(fakeStatus))
     emptyBucket.lifecycle.usage.archiveable = []
     renderedText.length = 0
     lcUsageHidden = []
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: emptyBucket, open: true } }))
     const emptyText = renderedText.join(' | ')
-    assert.equal(lcUsageHidden.length, 2, 'empty bucket renders no list')
-    assert.equal((emptyText.match(/展开/g) || []).length, 2, 'empty bucket renders no expand button')
-    assert.ok(emptyText.includes('45 天够格归档（0）'), 'count still shown for empty bucket')
-    ok('empty bucket has no expand affordance')
+    assert.equal(lcUsageHidden.length, 1, 'empty bucket renders no list')
+    assert.ok(emptyText.includes('暂无'), 'empty bucket shows a hint')
+    ok('empty bucket shows a hint instead of a list')
 
-    // 坏阈值类型（字符串 "14"）：整组不渲染，也不许写出 "14 天未用"
+    // 坏阈值类型（字符串 "14"）：整段不渲染，也不许写出 "14 天未用"
     const badType = JSON.parse(JSON.stringify(fakeStatus))
     badType.lifecycle.usage.staleDays = '14'
     renderedText.length = 0
     lcUsageHidden = []
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: badType, open: true } }))
     const badTypeText = renderedText.join(' | ')
-    assert.equal(lcUsageHidden.length, 2, 'string threshold drops the idle group instead of coercing')
+    assert.equal(lcUsageHidden.length, 1, 'string threshold drops the idle section instead of coercing')
     assert.ok(!badTypeText.includes('14 天未用'), 'no coerced threshold in copy')
     ok('non-numeric thresholds are dropped, not coerced')
 
-    // 详情页头部：加载中 / 失败 两条新文案（之前只有 summary 分支有用例）
+    // 详情页头部：加载中 / 失败 两条文案
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, open: true } }))
     const loadingText = renderedText.join(' | ')
@@ -507,13 +502,12 @@ ok('save flow writes user layer')
     assert.ok(renderedText.join(' | ').includes('状态获取失败'), 'detail header shows error copy')
     ok('detail header distinguishes loading / error')
 
-    // 握手必须是真的门槛：没有 __smoke 的 __debug 不得生效（否则宿主/别人传个
-    // __debug:{} 就能把面板永久卡在"加载中"并吞掉 fetch 数据）
+    // 握手必须是真的门槛：没有 __smoke 的 __debug 不得生效
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
     const noHandshake = renderedText.join(' | ')
     assert.ok(noHandshake.includes('加载中…'), 'debug without __smoke must be ignored')
-    assert.ok(!noHandshake.includes('从未用 1'), 'injected status must not leak without the handshake')
+    assert.ok(!noHandshake.includes('14 天未用'), 'injected status must not leak without the handshake')
     ok('__debug seam requires the __smoke handshake')
   } finally {
     globalThis.fetch = realFetch
