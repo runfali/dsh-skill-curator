@@ -232,8 +232,18 @@ export async function listSkills(root, excluded = []) {
     return out // 根不存在 → 空表
   }
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue
     if (!SKILL_ID.test(entry.name)) continue
+    // junction / 目录符号链接的 Dirent.isDirectory() 是 false，但 stat 会跟随链接。
+    // 漏掉这一步等于「用链接接入的技能库一律不可见」—— 而且 now 会表现为
+    // 「空列表 + 守卫跳过」，看起来像永久空库（2026-10-30 审计）。
+    if (!entry.isDirectory()) {
+      try {
+        const st = await stat(join(root, entry.name))
+        if (!st.isDirectory()) continue
+      } catch {
+        continue
+      }
+    }
     const md = skillPath(root, entry.name)
     let raw
     try {

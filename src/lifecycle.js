@@ -39,6 +39,21 @@ export function isValidSkillName(name) {
 }
 
 /**
+ * 目录条目判定（跟随 junction / 目录软链）。
+ * Dirent.isDirectory() 对 junction 返回 false，直接用会漏掉「用链接接入的技能库」。
+ * @param {string} root
+ * @param {import('node:fs').Dirent} entry
+ */
+function isDirEntry(root, entry) {
+  if (entry.isDirectory()) return true
+  try {
+    return statSync(join(root, entry.name)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
  * 判定锚点：最后一次使用，没有就用首次登记。
  *
  * lastUsedAt === 0 / 非数字是**坏数据**，不是「1970 年用过」——不归一的话
@@ -202,8 +217,13 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         // 未显式传名单时自己读盘：技能库里有 SKILL.md 的目录才算技能。
         // 省略 names 时返回 [] 会让 seeded 恒为 0（计划原稿的缺陷，执行期实测抓出）。
         try {
+          // junction/目录软链的 Dirent.isDirectory() 是 false，statSync 会跟随 ——
+          // 与 skill-tools.listSkills 的判据保持一致，否则两条路径对"什么是技能"意见不同。
           list = readdirSync(root, { withFileTypes: true })
-            .filter((e) => e.isDirectory() && existsSync(join(root, e.name, 'SKILL.md')))
+            .filter((e) => {
+              if (!isDirEntry(root, e)) return false
+              return existsSync(join(root, e.name, 'SKILL.md'))
+            })
             .map((e) => e.name)
         } catch {
           list = []
@@ -465,7 +485,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       for (const [name, rec] of Object.entries(state.skills)) {
         const bucket = out[rec.state] || out.active
         bucket.push(name)
-        if (!rec.lastUsedAt) out.neverUsed.push(name)
+        // 与 usageReport().neverUsed 同源：运行时技能（磁盘上没目录）、已归档、
+        // 钉住都不该算「从未使用」——否则工具输出与面板数字对不上（2026-10-30 审计）。
+        if (!rec.lastUsedAt && rec.origin !== 'runtime' && rec.state !== 'archived' && !rec.pinned) {
+          out.neverUsed.push(name)
+        }
       }
       for (const key of Object.keys(out)) out[key].sort()
       const result = {

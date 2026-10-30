@@ -1047,6 +1047,20 @@ test('dispose 只删自己的锁：别的实例（不同 pid）的锁不得被�
   assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid + 1)
 })
 
+test('dispose 只删自己的锁：同 pid 不同 nonce（热重载）也不得删', () => {
+  // settings 热重载是同进程换 fiber：新实例刚写了锁（同 pid、新 nonce），
+  // 旧实例的 disposer 若只比 pid 就会把它删掉。
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const lock = join(dirname(t.lifecycle.path), 'lifecycle.lock')
+  const before = JSON.parse(readFileSync(lock, 'utf8'))
+  writeFileSync(lock, JSON.stringify({ ...before, nonce: 'another-fiber' }))
+  for (const dispose of t.effects) { if (typeof dispose === 'function') { try { dispose() } catch { /* 无关 */ } } }
+  assert.ok(existsSync(lock), '同 pid 但 nonce 不同 = 别的实例的锁，必须保留')
+  assert.equal(JSON.parse(readFileSync(lock, 'utf8')).nonce, 'another-fiber')
+})
+
 test('卸载时 flush：dispose 后节流窗口内的最后一次使用也已落盘', () => {
   // markUsed 有 60s 落盘节流，进程正好在窗口内退出就会丢掉这次使用
   // （2026-10-30 查到的 cloud-cost-estimation 就是这种形态）。尾随定时器在

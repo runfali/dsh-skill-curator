@@ -23,6 +23,7 @@
  *   - 评审异步执行，与主线完全解耦。
  */
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Config, createSettings } from './settings.js'
@@ -255,9 +256,12 @@ export function apply(ctx, config = {}) {
   // 回填脚本靠它判断「dsh 是否在跑」——比探测 HTTP 端口可靠：端口是可配的，
   // 探错端口就会边跑边写，插件下一次 persist 会把回填结果整份覆盖。
   const lockPath = join(dirname(lifecycle.path), 'lifecycle.lock')
+  // nonce：settings 热重载是**同进程**换 fiber，新旧实例的 pid 相同。只比 pid 的话，
+  // 旧 fiber 的 disposer 会把新 fiber 刚写的锁删掉（2026-10-30 复审）。
+  const lockNonce = randomUUID()
   try {
     mkdirSync(dirname(lockPath), { recursive: true })
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, nonce: lockNonce, at: Date.now() }))
   } catch (error) {
     ctx.logger.warn('skill-curator: lifecycle lock write failed: %s', (error && error.message) || error)
   }
@@ -269,7 +273,7 @@ export function apply(ctx, config = {}) {
       // 只在锁仍是**本实例**的才删：desktop + web 共用 DSH_HOME 双开时，
       // 先退出的实例会删掉另一实例的锁，回填护栏随之失效（2026-10-30 复审）。
       const held = JSON.parse(readFileSync(lockPath, 'utf8'))
-      if (held && held.pid === process.pid) rmSync(lockPath, { force: true })
+      if (held && held.pid === process.pid && held.nonce === lockNonce) rmSync(lockPath, { force: true })
     } catch { /* 锁不存在或内容坏了：不动它 */ }
     lifecycle.flush()
   }, 'skill-curator: lifecycle flush on dispose')
