@@ -407,6 +407,17 @@ ok('save flow writes user layer')
     // 只有 idle 那一组没有阈值可写 → 整组不渲染（不是渲染成 "undefined 天"）
     assert.equal(lcUsageHidden.length, 2, 'groups without a threshold are dropped, not rendered with undefined')
     ok('lifecycle panel degrades on partial status (summary + detail)')
+
+    // 首帧（status 还没回来）与失败（status.error）必须说清楚，
+    // 不能都显示「没有够格归档的技能」——那是谎报平安
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary' }))
+    assert.equal(renderedText.join(''), '加载中…', 'loading state has its own copy')
+
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: { error: true }, open: true } }))
+    assert.equal(renderedText.join(''), '状态获取失败', 'error state is not reported as "nothing to do"')
+    ok('lifecycle summary distinguishes loading / error / idle')
   } finally {
     globalThis.fetch = realFetch
   }
