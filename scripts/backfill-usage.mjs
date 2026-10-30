@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import zlib from 'node:zlib'
 import { usageCandidates } from '../src/usage-scan.js'
-import { createLifecycleStore, defaultLifecyclePath } from '../src/lifecycle.js'
+import { createLifecycleStore } from '../src/lifecycle.js'
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 const DAY = 86400000
@@ -116,7 +116,9 @@ function fmt(ts) {
 }
 
 const opts = parseArgs(process.argv.slice(2))
-const file = defaultLifecyclePath()
+// 状态文件必须跟着 --home 走：用 defaultLifecyclePath() 会退回 process.env.DSH_HOME / homedir，
+// 于是「扫 A 目录的会话、写 B 目录的状态」——两个真源，错了没人看得出来。
+const file = join(opts.home, 'skill-curator', 'lifecycle.json')
 if (!existsSync(file)) {
   console.error('lifecycle.json 不存在：' + file)
   process.exit(1)
@@ -193,5 +195,16 @@ copyFileSync(file, backup)
 console.log('')
 console.log('已备份 ->', backup)
 for (const u of updates) store.markUsed(u.name, { now: u.ts })
-store.flush()
-console.log('已写入', updates.length, '条 lastUsedAt（只增不减）')
+const flushed = store.flush()
+if (!flushed) {
+  console.error('写入失败（flush 返回 false），lifecycle.json 未被修改或只写了一半；备份在', backup)
+  process.exit(1)
+}
+// 回读核验：只打印"成功"不算数，必须证明磁盘上真的是这些值
+const written = JSON.parse(readFileSync(file, 'utf8'))
+const missing = updates.filter((u) => !written.skills[u.name] || written.skills[u.name].lastUsedAt !== u.ts)
+if (missing.length > 0) {
+  console.error('回读核验失败，以下条目没有落盘：', missing.slice(0, 5).map((u) => u.name).join(', '))
+  process.exit(1)
+}
+console.log('已写入', updates.length, '条 lastUsedAt（只增不减），回读核验通过')

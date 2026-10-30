@@ -877,10 +877,22 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   assert.equal(life.snapshot().skills['review-beta'], undefined, '评审会话的加载不得计数（否则全库被刷新鲜）')
 
   // 路径命中：直接读技能文件 / 在技能目录里跑脚本也算一次使用（方案 1）。
+  // 前置：技能必须先在状态表里（磁盘技能由 syncWith 登记，运行时技能由 skill 工具登记）。
+  const root = t.skillsRoot
+  for (const n of ['path-skill', 'script-skill']) {
+    mkdirSync(join(root, n), { recursive: true })
+    writeFileSync(join(root, n, 'SKILL.md'), '---\nname: ' + n + '\ndescription: d\n---\n')
+  }
+  life.syncWith(root)
   await cbs[0]({ name: 'read', arguments: { file_path: 'C:\\Users\\x\\.dsh\\skills\\path-skill\\SKILL.md' }, agent: { session: { header: {} } } }, next)
   assert.ok(life.snapshot().skills['path-skill']?.lastUsedAt > 0, '路径命中必须计数')
   await cbs[0]({ name: 'ops_bash', arguments: { command: 'python3 /home/x/.dsh/skills/script-skill/scripts/run.py' }, agent: { session: { header: {} } } }, next)
   assert.ok(life.snapshot().skills['script-skill']?.lastUsedAt > 0, '技能目录里跑脚本必须计数')
+
+  // 未知技能（已删除/路径写错）不得因为路径而被造出来：syncWith 不删 runtime origin，
+  // 一条幽灵记录会永久抬高「在用」计数。
+  await cbs[0]({ name: 'read', arguments: { file_path: 'C:\\Users\\x\\.dsh\\skills\\ghost-skill\\SKILL.md' }, agent: { session: { header: {} } } }, next)
+  assert.equal(life.snapshot().skills['ghost-skill'], undefined, '未知技能的路径不得造 runtime 幽灵记录')
 
   // 维护动作不算使用：即使参数里带着技能路径（评审读写技能库每周 2000+ 次）。
   await cbs[0]({ name: 'skill-library-read', arguments: { name: 'maint-skill' }, agent: { session: { header: {} } } }, next)
@@ -997,6 +1009,21 @@ test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字�
   assert.equal(usage.archiveable[0].days, 100, '天数按天向下取整')
   assert.ok(usage.idle.some((x) => x.name === 'old-skill'), '也在 30 天未用里（archiveable ⊆ idle）')
   assert.equal(usage.neverUsed.length, 0, '刚 markUsed 过的技能不算从未使用')
+})
+
+test('status 在 usageReport 抛错时降级而不是 500（坏设置不该让面板变瞎）', async () => {
+  const env = makeCtx({})
+  applyIn(env, { __webServerReady: true, staleDays: { get: () => Number.NaN } })
+  const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/status')
+  let code = 0
+  const body = await new Promise((resolve) => {
+    const res = { writeHead(c) { code = c }, end(payload) { resolve(JSON.parse(payload)) } }
+    route.handler({ method: 'GET', headers: { host: '127.0.0.1:7009' } }, res)
+  })
+  assert.equal(code, 200, '不得因为面板统计抛错而 500')
+  assert.equal(body.ok, true)
+  assert.equal(body.lifecycle.usage, null, '统计降级为 null，前端退回旧摘要')
+  assert.ok(body.lifecycle.active, '其余生命周期数据照常返回（归档/恢复按钮不能跟着消失）')
 })
 
 // transitions() 对非有限 staleDays/archiveDays 会抛错（Task 2 的响亮失败设计），

@@ -380,6 +380,23 @@ test('usageReport：归档 / 运行时技能 / 钉住 都不进任何桶', () =>
   assert.deepEqual(r.archiveable.map((x) => x.name), ['kept-old'])
 })
 
+test('usageReport：坏数据（缺 firstSeenAt / 非数字 lastUsedAt）不产生 NaN', () => {
+  // 手改或半写的 lifecycle.json 会缺字段。NaN 参与排序是乱序，序列化后变 null，
+  // 前端会渲染成 "null 天" —— 必须在分桶这一层就归一。
+  const { store } = fixture()
+  const now = Date.now()
+  seedState(store, {
+    'broken-anchor': { firstSeenAt: undefined, lastUsedAt: 'oops' },
+    'ok-skill': { lastUsedAt: now - 5 * DAY_MS }
+  })
+  const r = store.usageReport({ staleDays: 30, archiveDays: 90, now })
+  const all = [...r.neverUsed, ...r.idle, ...r.archiveable]
+  assert.ok(all.every((x) => Number.isFinite(x.days)), 'days 必须是有限数字')
+  const broken = r.neverUsed.find((x) => x.name === 'broken-anchor')
+  assert.equal(broken.days, 0, '缺锚点按 0 天处理')
+  assert.equal(broken.lastUsedAt, null, '非数字 lastUsedAt 归一成 null')
+})
+
 test('usageReport：阈值跟随设置，非法值响亮失败', () => {
   const { store } = fixture()
   const now = Date.now()

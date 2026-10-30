@@ -232,12 +232,19 @@ export function apply(ctx, config = {}) {
   })
   ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => {
     try {
+      const fromSkillTool = Boolean(exec && exec.name === 'skill')
       const names = usageCandidates({
         tool: exec && exec.name,
         args: exec && exec.arguments,
         agent: exec && exec.agent
       })
-      for (const name of names) lifecycle.markUsed(name)
+      for (const name of names) {
+        // 路径命中只刷新**已知**技能（磁盘技能由 syncWith 登记，运行时技能由 skill 工具登记）。
+        // 不设这道闸，任何提到过某个已删除技能路径的命令都会造出一条 origin='runtime'
+        // 的幽灵记录 —— 而 syncWith 永远不删 runtime origin，于是「在用 N」只增不减。
+        if (!fromSkillTool && !lifecycle.has(name)) continue
+        lifecycle.markUsed(name)
+      }
     } catch (error) {
       ctx.logger.warn('skill-curator: usage observation failed: %s', (error && error.message) || error)
     }
@@ -611,7 +618,18 @@ export function apply(ctx, config = {}) {
               // 挂在 REST 上而不是 summary() 里：summary 同时喂给
               // skill-library-lifecycle 工具，评审 prompt 已声明它「不含逐技能时间戳」，
               // 往里加字段会改变评审子代理看到的契约。
-              usage: lifecycle.usageReport({ staleDays: spec.staleDays, archiveDays: spec.archiveDays })
+              //
+              // 降级而不是 500：usageReport 对坏阈值会响亮抛错（与 transitions 同款设计），
+              // 但 /status 是面板唯一数据源 —— 一个写坏的设置项不该让整个面板变瞎子
+              // （连归档/恢复按钮都跟着消失）。失败时给 null，前端自动退回旧摘要。
+              usage: (() => {
+                try {
+                  return lifecycle.usageReport({ staleDays: spec.staleDays, archiveDays: spec.archiveDays })
+                } catch (error) {
+                  ctx.logger.warn('skill-curator: usage report failed: %s', (error && error.message) || error)
+                  return null
+                }
+              })()
             },
             archiveEnabled: spec.archiveEnabled,
             reviews: reviewLog.recent().slice(0, 5)

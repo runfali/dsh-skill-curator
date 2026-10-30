@@ -107,6 +107,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       return JSON.parse(JSON.stringify(state))
     },
 
+    /** 这个技能是否已在状态表里（免去 snapshot() 的整表深拷贝）。 */
+    has(name) {
+      return typeof name === 'string' && state.skills[name] !== undefined
+    },
+
     /** 测试专用：整表替换（生产代码不要用）。 */
     __replaceForTest(next) {
       state = next
@@ -389,8 +394,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         if (rec.origin !== 'disk') continue
         if (rec.state === 'archived') continue
         if (rec.pinned) continue
-        const anchor = rec.lastUsedAt ?? rec.firstSeenAt
-        rows.push({ name, lastUsedAt: rec.lastUsedAt ?? null, ageDays: (now - anchor) / DAY_MS })
+        // 坏数据兜底：手改/半写的 lifecycle.json 里 firstSeenAt 可能缺失或非数字，
+        // 直接相减会得到 NaN，NaN 参与排序与 JSON 序列化后变成 null / 乱序。
+        const last = Number.isFinite(rec.lastUsedAt) ? rec.lastUsedAt : null
+        const anchor = last !== null ? last : (Number.isFinite(rec.firstSeenAt) ? rec.firstSeenAt : now)
+        rows.push({ name, lastUsedAt: last, ageDays: Math.max(0, (now - anchor) / DAY_MS) })
       }
       const bucket = (predicate) =>
         rows

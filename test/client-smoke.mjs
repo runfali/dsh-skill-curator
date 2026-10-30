@@ -309,6 +309,15 @@ ok('save flow writes user layer')
       }
     }
   }
+  // CSS 契约：折叠靠 [hidden]，而 .SCc_lcList 自带 display:flex —— 作者样式压过
+  // 浏览器默认的 [hidden]{display:none}，缺少下面这条规则折叠等于没做，而且
+  // 任何渲染断言都发现不了（树里节点一直在）。只能钉源码规则。
+  assert.match(
+    bundleSource,
+    /\.SCc_lcList\[hidden\]\{display:none\}/,
+    'collapsed usage list must actually hide (display:flex overrides UA [hidden])'
+  )
+
   const realFetch = globalThis.fetch
   // 面板在 useEffect 里 load()：返回已 resolve 的 promise。
   // 组件渲染是同步的，首帧拿不到数据 → 只能断言**折叠态标题**。
@@ -330,6 +339,10 @@ ok('save flow writes user layer')
     assert.ok(text.includes('old-c · 120 天'), 'archiveable name + age rendered')
     // 旧的「久未用」状态桶必须消失（与年龄分组重复，会给出两个互相矛盾的数字）
     assert.ok(!text.includes('久未用'), 'legacy stale bucket removed from the panel')
+    // 归档候选与「够格归档」分组同源：夹具里 wouldArchive 是状态机旧值（alpha-skill），
+    // 现算的 usage.archiveable 是 old-c —— 面板必须用后者，否则两处数字互相矛盾。
+    assert.ok(text.includes('old-c'), 'archive list uses live usage.archiveable')
+    assert.ok(!text.includes('alpha-skill'), 'stale wouldArchive must not drive the archive list')
     ok('lifecycle panel renders usage groups (counts + names + ages)')
 
     // 列表页一行摘要：不点进去也能看到三个数
@@ -340,6 +353,16 @@ ok('save flow writes user layer')
     assert.ok(summary.includes('14 天未用 1'), 'summary line shows idle count with setting threshold')
     assert.ok(summary.includes('45 天够格 1'), 'summary line shows archiveable count')
     ok('lifecycle summary line shows three counts')
+
+    // 半旧版 status（有桶没阈值）必须退回旧摘要，而不是渲染 "undefined 天未用"
+    const legacy = JSON.parse(JSON.stringify(fakeStatus))
+    delete legacy.lifecycle.usage.staleDays
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: legacy, open: true } }))
+    const legacyText = renderedText.join(' ')
+    assert.ok(!legacyText.includes('undefined'), 'bad status must not leak undefined into copy')
+    assert.ok(legacyText.includes('够格归档'), 'falls back to the legacy one-line summary')
+    ok('lifecycle summary degrades on partial status')
   } finally {
     globalThis.fetch = realFetch
   }

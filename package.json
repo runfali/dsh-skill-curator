@@ -13,6 +13,7 @@
   "files": [
     "src",
     "lib",
+    "scripts",
     "cordis.patch.yml",
     "docs/COMPARISON.md",
     "docs/DSH-0.2.0-ADAPTATION.md",
