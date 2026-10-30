@@ -15,11 +15,26 @@
  * 归档目录：<DSH_HOME>/skill-curator/archived/<name>/（**技能库之外**，
  * 否则宿主 provider 会把归档技能当正常技能发现）。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
 export const DAY_MS = 86400000
+
+/**
+ * 合法技能名（白名单）。
+ *
+ * 为什么必须有：`state.skills` 是普通对象，`state.skills['__proto__']` 命中的是
+ * **Object.prototype**，ensure() 会把 lastUsedAt 直接写到整个进程共享的原型上
+ * （2026-10-30 审计实测：markUsed('__proto__') 之后 ({}) .lastUsedAt 就有值了）。
+ * 首字符不允许 `_`，所以 `__proto__` / `__defineGetter__` 在入口就被挡掉。
+ */
+export const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+/** 名字能否用作状态表键（非字符串 / 空串 / 原型魔法名一律拒绝）。 */
+export function isValidSkillName(name) {
+  return typeof name === 'string' && SKILL_NAME.test(name)
+}
 
 /** markUsed 的落盘节流窗口（毫秒）。 */
 export const FLUSH_THROTTLE_MS = 60_000
@@ -84,8 +99,14 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
 
   /** 登记一个技能（已存在则不动）。 */
   function ensure(name, now = Date.now()) {
-    if (!state.skills[name]) {
-      state.skills[name] = {
+    if (!Object.hasOwn(state.skills, name)) {
+      // defineProperty 而不是 state.skills[name] = ...：对象字面量对 __proto__
+      // 会走原型 setter（等于改 Object.prototype），defineProperty 建的是自有属性。
+      Object.defineProperty(state.skills, name, {
+        enumerable: true,
+        configurable: true,
+        writable: true,
+        value: {
         state: 'active',
         firstSeenAt: now,
         lastUsedAt: null,
@@ -96,7 +117,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         // 缺它的话 syncWith 的 dropped 循环分不清「运行时技能」与「真被删掉的技能」，
         // 会把 skill-curator 每轮评审都清掉（2026-10-20 真机实测）。
         origin: 'runtime'
-      }
+        }
+      })
     }
     return state.skills[name]
   }
@@ -109,7 +131,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
 
     /** 这个技能是否已在状态表里（免去 snapshot() 的整表深拷贝）。 */
     has(name) {
-      return typeof name === 'string' && state.skills[name] !== undefined
+      // Object.hasOwn 而不是 state.skills[name] !== undefined：后者会命中原型链，
+      // 于是 has('__proto__') 恒为 true，名字白名单形同虚设。
+      return isValidSkillName(name) && Object.hasOwn(state.skills, name)
     },
 
     /** 测试专用：整表替换（生产代码不要用）。 */
@@ -125,7 +149,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
      * @param {number} [opts.now] - 时间戳（测试注入）。
      */
     markUsed(name, { now = Date.now() } = {}) {
-      if (typeof name !== 'string' || !name) return
+      // 名字白名单在这里也要挡：markUsed 是唯一会被工具参数直接驱动的写入口。
+      if (!isValidSkillName(name)) return
       const rec = ensure(name, now)
       rec.lastUsedAt = now
       // 被使用即从 stale/archived 复活（archived = 目录已被放回技能库）
@@ -163,10 +188,24 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         }
       }
       const seen = new Set(list)
+
+      // 运行时技能的过期清理：它们磁盘上没有目录，下面的 dropped 循环**永不**删它们
+      // （那是为了让 skill-curator 这类运行时技能活下来）。代价是一次写错名字的
+      // skill 工具调用会永久留在名单里 ——「在用 N」只增不减。这里给一条时间上限：
+      // 超过 180 天没再命中就丢掉（真被使用时 markUsed 会重新登记）。
+      // 技能根读不到 / 临时为空时 listSkills 会返回 []：绝不能当成「全被删了」。
+      // 否则一次 readdir 失败就会清空所有 firstSeenAt/lastUsedAt（/status 每 30s
+      // 轮询一次，随时可能撞上），目录恢复后重新登记为「首见=当下」，历史不可恢复。
+      const diskKnown = Object.values(state.skills).filter((r) => r.origin === 'disk' && r.state !== 'archived').length
+      if (list.length === 0 && diskKnown > 0) {
+        log('warn', `skill-curator: skill root listed 0 skills while ${diskKnown} are known; skip pruning this round`)
+        return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
+      }
+
       let seeded = 0
       let restored = 0
       for (const name of list) {
-        const rec = state.skills[name]
+        const rec = Object.hasOwn(state.skills, name) ? state.skills[name] : null
         if (!rec) {
           ensure(name).origin = 'disk'
           seeded += 1
@@ -192,19 +231,46 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
           restored += 1
         }
       }
-      let dropped = 0
-      for (const name of Object.keys(state.skills)) {
+      // 运行时技能的过期清理必须在「提升为 disk」之后：同一个名字可能这次才刚回到
+      // 技能库（seen 里有它），先清后提会把一条真实技能当成幽灵删掉，然后重新登记
+      // 成「首见=当下」——历史直接归零（2026-10-30 自测过：面板候选突然消失）。
+      const RUNTIME_TTL_MS = 180 * DAY_MS
+      let expired = 0
+      for (const [name, rec] of Object.entries(state.skills)) {
+        if (seen.has(name)) continue
+        if (rec.origin !== 'runtime' || rec.pinned || rec.state === 'archived') continue
+        const last = Number.isFinite(rec.lastUsedAt) && rec.lastUsedAt > 0 ? rec.lastUsedAt : rec.firstSeenAt
+        if (!Number.isFinite(last)) continue
+        if (Date.now() - last > RUNTIME_TTL_MS) {
+          delete state.skills[name]
+          expired += 1
+        }
+      }
+
+      // 先算出这一轮要删谁，删得多就先留一份 .bak —— 一次大规模误删（技能库被挂载
+      // 到别处、DSH_HOME 指错）是**不可逆**的数据损失，而 backups/ 只服务回填脚本。
+      const toDrop = Object.keys(state.skills).filter((name) => {
         const rec = state.skills[name]
         // 只清「曾经是磁盘技能、现在磁盘上没有」的条目。
         // 运行时技能（origin === 'runtime'，如 skill-curator）在磁盘上**永远没有**
         // 目录，不能因为它不在 list 里就删 —— 那会让它每轮评审都消失（2026-10-20
         // 真机实测：加载 skill-curator → 下一轮 syncWith 后状态表里查不到）。
         // archived 同样豁免：归档目录在技能库之外，本来就不在 list 里。
-        if (rec.origin === 'runtime') continue
-        if (!seen.has(name) && rec.state !== 'archived') {
-          delete state.skills[name]
-          dropped += 1
+        if (rec.origin === 'runtime') return false
+        return !seen.has(name) && rec.state !== 'archived'
+      })
+      let dropped = expired
+      if (toDrop.length >= 5) {
+        try {
+          copyFileSync(path, `${path}.bak`)
+          log('warn', `skill-curator: pruning ${toDrop.length} skills; snapshot saved to ${path}.bak`)
+        } catch {
+          /* 备份失败不阻塞清理，但要留痕 */
         }
+      }
+      for (const name of toDrop) {
+        delete state.skills[name]
+        dropped += 1
       }
       if (seeded > 0 || dropped > 0 || restored > 0) persist()
       return { seeded, dropped, restored }
@@ -396,7 +462,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         if (rec.pinned) continue
         // 坏数据兜底：手改/半写的 lifecycle.json 里 firstSeenAt 可能缺失或非数字，
         // 直接相减会得到 NaN，NaN 参与排序与 JSON 序列化后变成 null / 乱序。
-        const last = Number.isFinite(rec.lastUsedAt) ? rec.lastUsedAt : null
+        // lastUsedAt === 0 是「坏数据」而不是「1970 年用过」：不归一的话它既算
+        // 「从未使用」（!0 为真）又拿 1970 当锚点算年龄（≈20000 天，直接进归档候选）。
+        const last = Number.isFinite(rec.lastUsedAt) && rec.lastUsedAt > 0 ? rec.lastUsedAt : null
         const anchor = last !== null ? last : (Number.isFinite(rec.firstSeenAt) ? rec.firstSeenAt : now)
         rows.push({ name, lastUsedAt: last, ageDays: Math.max(0, (now - anchor) / DAY_MS) })
       }

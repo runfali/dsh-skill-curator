@@ -1,9 +1,17 @@
 @echo off
-rem 停止 dsh 之后双击本文件：把历史会话里的真实使用时间回填进 lifecycle.json
-rem 先干跑一遍看 diff，确认后回车再写入
+rem Backfill skill usage history into lifecycle.json.
+rem Close dsh completely BEFORE running this, otherwise the running plugin
+rem rewrites the whole in-memory table and silently clobbers the result.
+setlocal
 cd /d "%~dp0.."
+where node >nul 2>nul
+if errorlevel 1 (
+  echo node.exe not found in PATH.
+  pause
+  exit /b 1
+)
 node scripts\backfill-usage.mjs
 echo.
-set /p GO=确认写入请按回车（Ctrl+C 取消）...
+set /p GO=Press Enter to WRITE (Ctrl+C to cancel)...
 node scripts\backfill-usage.mjs --write
 pause

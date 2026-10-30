@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import zlib from 'node:zlib'
 import { usageCandidates } from '../src/usage-scan.js'
-import { createLifecycleStore } from '../src/lifecycle.js'
+import { createLifecycleStore, isValidSkillName } from '../src/lifecycle.js'
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 const DAY = 86400000
@@ -36,7 +36,11 @@ function parseArgs(argv) {
     else if (a === '--dry-run') out.write = false
     else if (a === '--force') out.force = true
     else if (a === '--port') out.port = Number(argv[++i]) || 31102
-    else if (a === '--home') out.home = argv[++i]
+    else if (a === '--home') {
+      const v = argv[++i]
+      if (!v) { console.error('--home 需要一个目录参数'); process.exit(2) }
+      out.home = v
+    }
     else if (a === '--help' || a === '-h') {
       console.log('用法: node scripts/backfill-usage.mjs [--write] [--home <DSH_HOME>]')
       process.exit(0)
@@ -132,16 +136,23 @@ let skippedArchived = 0
 let skippedUnknown = 0
 const now = Date.now()
 for (const [name, ts] of map) {
+  // Object.hasOwn：直接用 snapshot.skills[name] 会命中原型链（'__proto__' 拿到的是
+  // Object.prototype，被当成一条现有记录写下去就是原型污染）。
+  if (!isValidSkillName(name) || !Object.hasOwn(snapshot.skills, name)) { skippedUnknown += 1; continue }
   const rec = snapshot.skills[name]
-  if (!rec) { skippedUnknown += 1; continue }
   if (rec.state === 'archived') { skippedArchived += 1; continue }
   if (rec.lastUsedAt && rec.lastUsedAt >= ts) continue
   updates.push({ name, ts, prev: rec.lastUsedAt || 0 })
 }
 updates.sort((a, b) => b.ts - a.ts)
 
-const before = Object.values(snapshot.skills).filter((r) => r.origin === 'disk' && r.state !== 'archived' && !r.lastUsedAt).length
-const after = before - updates.filter((u) => !snapshot.skills[u.name].lastUsedAt).length
+// 前后两个数字必须用**同一个** predicate 现算：混用「过滤条件不同的减法」会算出负数，
+// 也会把 runtime 记录算进差值的分子（2026-10-30 审计）。
+const pending = (rec) => Boolean(rec) && rec.origin === 'disk' && rec.state !== 'archived' && !rec.lastUsedAt
+const before = Object.values(snapshot.skills).filter(pending).length
+const preview = { ...snapshot.skills }
+for (const u of updates) preview[u.name] = { ...preview[u.name], lastUsedAt: u.ts }
+const after = Object.values(preview).filter(pending).length
 
 console.log('DSH_HOME      :', opts.home)
 console.log('会话          :', sessions, '（其中评审会话', reviewSessions, '，已排除）')
@@ -168,19 +179,41 @@ if (!opts.write) {
 
 // 护栏：dsh 正在运行时**绝不能**写。运行中的插件把 lifecycle.json 整表读进内存，
 // 之后任意一次 markUsed / 评审都会把内存态整份写回，把回填结果静默覆盖掉。
-// 这里探活失败（端口不通 = 没在跑）才放行；确需覆盖用 --force。
-if (!opts.force) {
-  const port = opts.port
-  let alive = false
+//
+// 两个独立信号，命中任一即拒绝：
+//   1) 运行态锁 <home>/skill-curator/lifecycle.lock 里的 pid 还活着  ← 主判据
+//      （HTTP 端口可配，探错端口就会「边跑边写」，单靠端口不可靠）
+//   2) 默认端口上的 /status 有响应（兼容没有锁的旧版本）
+// 确需覆盖用 --force。
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
   try {
-    const res = await fetch('http://127.0.0.1:' + port + '/api/skill-curator/status', { signal: AbortSignal.timeout(1500) })
-    alive = res.ok
-  } catch {
-    alive = false
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return Boolean(error) && error.code === 'EPERM'
   }
-  if (alive) {
+}
+
+if (!opts.force) {
+  const lockFile = join(opts.home, 'skill-curator', 'lifecycle.lock')
+  let lockPid = null
+  if (existsSync(lockFile)) {
+    try { lockPid = JSON.parse(readFileSync(lockFile, 'utf8')).pid } catch { lockPid = null }
+  }
+  const lockHeld = isProcessAlive(lockPid)
+  let portAlive = false
+  if (!lockHeld) {
+    try {
+      const res = await fetch('http://127.0.0.1:' + opts.port + '/api/skill-curator/status', { signal: AbortSignal.timeout(1500) })
+      portAlive = res.ok
+    } catch {
+      portAlive = false
+    }
+  }
+  if (lockHeld || portAlive) {
     console.error('')
-    console.error('拒绝写入：dsh 正在运行（127.0.0.1:' + port + ' 可访问）。')
+    console.error('拒绝写入：dsh 正在运行（' + (lockHeld ? 'lifecycle.lock 的 pid ' + lockPid + ' 仍存活' : '127.0.0.1:' + opts.port + ' 可访问') + '）。')
     console.error('运行中的插件会把内存里的 lifecycle 整份写回，覆盖掉本次回填。')
     console.error('请先完全退出 dsh，再运行： node scripts/backfill-usage.mjs --write')
     process.exit(2)

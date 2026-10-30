@@ -312,6 +312,58 @@ test('summary 的 wouldArchive 与 transitions 判定同源（推荐的都是真
   assert.equal(counts.wouldArchive, 1, 'transitions 也认为它够格')
 })
 
+test('markUsed / has 不接受原型魔法名：__proto__ 不得污染 Object.prototype', () => {
+  // 2026-10-30 审计实测：state.skills['__proto__'] 命中的是 Object.prototype，
+  // ensure() 会把 lastUsedAt 写到整个进程共享的原型上（({}).lastUsedAt 就有值）。
+  const { store } = fixture()
+  store.markUsed('__proto__', { now: Date.now() })
+  store.markUsed('__defineGetter__', { now: Date.now() })
+  assert.equal(store.has('__proto__'), false, 'has 不得命中原型链（__proto__ 走 setter）')
+  assert.equal(({}).lastUsedAt, undefined, 'Object.prototype 不得被污染')
+  assert.deepEqual(Object.keys(store.snapshot().skills), [], '首字符是下划线的名字一条都不许登记')
+
+  // 'constructor' 是合法形状的名字：defineProperty 会建**自有属性**，不会写到原型上。
+  // 这条断言防的是「换成 obj[name]=value 写法」的回归（那种写法会改原型）。
+  store.markUsed('constructor', { now: Date.now() })
+  assert.equal(Object.hasOwn(store.snapshot().skills, 'constructor'), true, '合法名字可以登记')
+  assert.equal(Object.prototype.constructor, Object, 'Object.prototype 不得被改写')
+  // 合法名字照常工作（白名单不能误伤 kebab-case / 点号）
+  store.markUsed('ok-skill', { now: Date.now() })
+  store.markUsed('ok.skill_v2', { now: Date.now() })
+  assert.ok(store.has('ok-skill') && store.has('ok.skill_v2'))
+})
+
+test('syncWith：技能根返回空列表时不得清空已有记录（读不到 ≠ 全被删）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'a-skill')
+  addSkill(root, 'b-skill')
+  store.syncWith(root)
+  const before = store.snapshot().skills
+  const res = store.syncWith(root, [])
+  assert.equal(res.dropped, 0, '空列表不得删任何记录')
+  assert.equal(res.skippedEmpty, true)
+  assert.deepEqual(store.snapshot().skills, before, 'firstSeenAt/lastUsedAt 必须原样保留')
+})
+
+test('syncWith：长期未命中的 runtime 幽灵记录会被清掉（写错名字不会永久留痕）', () => {
+  const { root, store } = fixture()
+  store.markUsed('ghost-typo', { now: Date.now() - 200 * DAY_MS })
+  assert.ok(store.has('ghost-typo'), '前置：已登记')
+  const res = store.syncWith(root)
+  assert.equal(store.has('ghost-typo'), false, '超过 180 天未命中的 runtime 记录应被清掉')
+  assert.ok(res.dropped >= 1)
+})
+
+test('syncWith：一次删 5 条以上先落 .bak 快照', () => {
+  const { root, store, file } = fixture()
+  for (const n of ['s1', 's2', 's3', 's4', 's5', 's6']) addSkill(root, n)
+  store.syncWith(root)
+  assert.ok(!existsSync(file + '.bak'), '前置：还没有备份')
+  const res = store.syncWith(root, ['keep-one'])
+  assert.equal(res.dropped, 6)
+  assert.ok(existsSync(file + '.bak'), '大规模清理前必须留快照（DSH_HOME 指错时能救回历史）')
+})
+
 test('markUsed 节流窗口内的最后一次使用最终会落盘（尾随 flush）', async () => {
   // 真机事故（2026-10-30）：cloud-cost-estimation 主会话加载成功，但 markUsed
   // 落在 60s 节流窗口内，进程随后重启 → 这次使用永久丢失。尾随 flush 修的就是它。
@@ -395,6 +447,16 @@ test('usageReport：坏数据（缺 firstSeenAt / 非数字 lastUsedAt）不产�
   const broken = r.neverUsed.find((x) => x.name === 'broken-anchor')
   assert.equal(broken.days, 0, '缺锚点按 0 天处理')
   assert.equal(broken.lastUsedAt, null, '非数字 lastUsedAt 归一成 null')
+})
+
+test('usageReport：lastUsedAt=0 视为坏数据（不是 1970 年用过）', () => {
+  const { store } = fixture()
+  const now = Date.now()
+  seedState(store, { 'zero-skill': { lastUsedAt: 0, firstSeenAt: now } })
+  const r = store.usageReport({ staleDays: 30, archiveDays: 90, now })
+  assert.deepEqual(r.archiveable, [], '0 不能被当成 1970 → 不得进归档候选')
+  assert.deepEqual(r.neverUsed.map((x) => x.name), ['zero-skill'], '归一到「从未使用」')
+  assert.equal(r.neverUsed[0].days, 0)
 })
 
 test('usageReport：阈值跟随设置，非法值响亮失败', () => {

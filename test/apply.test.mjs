@@ -19,7 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 process.env.DSH_CURATOR_HISTORY = join(mkdtempSync(join(tmpdir(), 'sc-apply-')), 'reviews.json')
 // 注意：reviewLog 是 export let（historyPath 覆盖时 apply 会重建），
@@ -833,7 +833,7 @@ test('stale agent disposed must not drop inherited counter (P2-2 race)', async (
   assert.equal(started.length, 1, 'stale disposed must not reset inherited counter')
 })
 
-test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理不计数）', async () => {
+test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理计数，评审会话不算）', async () => {
   const env = makeCtx({})
   applyIn(env, {})
   const t = env.__test
@@ -984,13 +984,18 @@ test('skill-library-lifecycle 的 archive/restore/pin 真的动盘且可回滚',
 
 test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字）', async () => {
   const env = makeCtx({})
-  applyIn(env, { __webServerReady: true })
-  // 真放一个"100 天未用"的技能进临时技能根：分桶必须由**真实磁盘技能**驱动，
+  // 阈值必须用**非默认值**：默认就是 30/90，用默认值等于没测「跟随设置」
+  // （把路由改成写死 {staleDays:30, archiveDays:90} 也会全绿 —— 审计抓到的假绿）。
+  applyIn(env, { __webServerReady: true, staleDays: { get: () => 7 }, archiveDays: { get: () => 45 } })
+  // 真放两个技能进临时技能根：分桶必须由**真实磁盘技能**驱动，
   // 否则只验证了空数组形状（过去踩过"删掉整块渲染也全绿"）。
+  // 100 天 → 两组都进；40 天 → 进 idle（>7）、不进 archiveable（<45），正好卡边界。
   const root = env.__test.skillsRoot
-  mkdirSync(join(root, 'old-skill'), { recursive: true })
-  writeFileSync(join(root, 'old-skill', 'SKILL.md'), '---\nname: old-skill\ndescription: d\n---\n\nbody\n')
-  env.__test.lifecycle.markUsed('old-skill', { now: Date.now() - 100 * 86400000 })
+  for (const [name, ageDays] of [['old-skill', 100], ['mid-skill', 40]]) {
+    mkdirSync(join(root, name), { recursive: true })
+    writeFileSync(join(root, name, 'SKILL.md'), '---\nname: ' + name + '\ndescription: d\n---\n\nbody\n')
+    env.__test.lifecycle.markUsed(name, { now: Date.now() - ageDays * 86400000 })
+  }
 
   const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/status')
   const body = await new Promise((resolve) => {
@@ -1003,12 +1008,44 @@ test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字�
   const usage = body.lifecycle.usage
   assert.ok(usage, 'status 必须带 usage 分桶（面板的三组数字）')
   // 阈值必须来自设置（跟随），不能写死 30/90
-  assert.equal(usage.staleDays, 30, 'staleDays 跟随设置默认值')
-  assert.equal(usage.archiveDays, 90, 'archiveDays 跟随设置默认值')
+  assert.equal(usage.staleDays, 7, 'staleDays 必须跟随设置（写死 30 会红）')
+  assert.equal(usage.archiveDays, 45, 'archiveDays 必须跟随设置（写死 90 会红）')
   assert.deepEqual(usage.archiveable.map((x) => x.name), ['old-skill'], '100 天未用的技能必须出现在够格归档里')
   assert.equal(usage.archiveable[0].days, 100, '天数按天向下取整')
-  assert.ok(usage.idle.some((x) => x.name === 'old-skill'), '也在 30 天未用里（archiveable ⊆ idle）')
+  const idleNames = usage.idle.map((x) => x.name)
+  assert.deepEqual(idleNames, ['old-skill', 'mid-skill'], 'idle 按年龄降序，两个都在（>7 天）')
+  assert.ok(!usage.archiveable.some((x) => x.name === 'mid-skill'), '40 天够不上 45 天阈值，不得进归档候选')
   assert.equal(usage.neverUsed.length, 0, '刚 markUsed 过的技能不算从未使用')
+})
+
+test('apply 写运行态锁、dispose 释放（回填脚本靠它判断 dsh 是否在跑）', () => {
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const lock = join(dirname(t.lifecycle.path), 'lifecycle.lock')
+  assert.ok(existsSync(lock), 'apply 必须写 lifecycle.lock')
+  assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid, '锁里必须是当前进程 pid')
+  for (const dispose of t.effects) { if (typeof dispose === 'function') { try { dispose() } catch { /* 其余 disposer 无关 */ } } }
+  assert.ok(!existsSync(lock), 'dispose 必须释放锁（崩溃残留会让回填永远写不进去）')
+})
+
+test('卸载时 flush：dispose 后节流窗口内的最后一次使用也已落盘', () => {
+  // markUsed 有 60s 落盘节流，进程正好在窗口内退出就会丢掉这次使用
+  // （2026-10-30 查到的 cloud-cost-estimation 就是这种形态）。尾随定时器在
+  // 正常退出时不一定来得及跑，所以 apply 里挂了 dispose → flush。
+  // 删掉那个 effect，本用例必须红。
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const life = t.lifecycle
+  const file = life.path
+  life.markUsed('first-skill', { now: Date.now() })
+  life.markUsed('late-skill', { now: Date.now() }) // 节流窗口内，只在内存
+  assert.ok(readFileSync(file, 'utf8').includes('first-skill'), '前置：第一次立即落盘')
+  assert.ok(!readFileSync(file, 'utf8').includes('late-skill'), '前置：窗口内的第二次尚未落盘')
+
+  for (const dispose of t.effects) { if (typeof dispose === 'function') { try { dispose() } catch { /* 其余 disposer 与本用例无关 */ } } }
+  assert.ok(readFileSync(file, 'utf8').includes('late-skill'), 'dispose 必须把最后一次使用落盘')
 })
 
 test('status 在 usageReport 抛错时降级而不是 500（坏设置不该让面板变瞎）', async () => {

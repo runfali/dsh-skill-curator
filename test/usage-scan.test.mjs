@@ -51,7 +51,9 @@ test('路径命中：read 技能目录下的文件算一次使用', () => {
 
 test('路径命中：一次调用里多个技能目录 → 去重且有序', () => {
   const args = {
-    command: 'diff ~/.dsh/skills/alpha/SKILL.md ~/.dsh/skills/beta/SKILL.md && cat ~/.dsh/skills/alpha/references/x.md'
+    // 故意让 beta 先出现：Set 的插入序是 beta→alpha，只有真的排序过才会得到
+    // ['alpha','beta']（旧写法输入本来就有序，删掉 .sort() 也绿 —— 审计抓到）
+    command: 'diff ~/.dsh/skills/beta/SKILL.md ~/.dsh/skills/alpha/SKILL.md && cat ~/.dsh/skills/alpha/references/x.md'
   }
   assert.deepEqual(usageCandidates({ tool: 'ops_bash', args, agent: main }), ['alpha', 'beta'])
 })
@@ -59,6 +61,11 @@ test('路径命中：一次调用里多个技能目录 → 去重且有序', () 
 test('路径命中：脚本在技能目录里跑（run_code / bash）同样算', () => {
   const args = { code: "await tools.ops_bash({command:'python3 /home/u/.dsh/skills/llm-wiki/scripts/wiki-ingest.py status'})" }
   assert.deepEqual(usageCandidates({ tool: 'run_code', args, agent: main }), ['llm-wiki'])
+})
+
+test('路径命中：结尾没有斜杠也算（ls ~/.dsh/skills/llm-wiki）', () => {
+  // 漏记方向是「更快被归档」，与本模块「宁可少归档」的立场相反，所以要收进来
+  assert.deepEqual(usageCandidates({ tool: 'ops_bash', args: { command: 'ls ~/.dsh/skills/llm-wiki' }, agent: main }), ['llm-wiki'])
 })
 
 test('路径命中：只有技能根、没有具体技能名时不算', () => {

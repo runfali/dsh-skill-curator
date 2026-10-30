@@ -22,7 +22,7 @@
  *   - 回调里不往父会话注入任何事件（防污染会话历史与记忆）；
  *   - 评审异步执行，与主线完全解耦。
  */
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Config, createSettings } from './settings.js'
@@ -251,9 +251,23 @@ export function apply(ctx, config = {}) {
     return next()
   }), 'skill-curator: usage observation')
 
-  // 卸载/热重载时把最后一次使用落盘：markUsed 有 60s 节流，进程正好在窗口内退出
-  // 会丢掉这次使用（2026-10-30 查到的 cloud-cost-estimation 就是这种形态）。
-  ctx.effect(() => () => { lifecycle.flush() }, 'skill-curator: lifecycle flush on dispose')
+  // 运行态锁：<lifecycle.json 同目录>/lifecycle.lock（内含 pid）。
+  // 回填脚本靠它判断「dsh 是否在跑」——比探测 HTTP 端口可靠：端口是可配的，
+  // 探错端口就会边跑边写，插件下一次 persist 会把回填结果整份覆盖。
+  const lockPath = join(dirname(lifecycle.path), 'lifecycle.lock')
+  try {
+    mkdirSync(dirname(lockPath), { recursive: true })
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }))
+  } catch (error) {
+    ctx.logger.warn('skill-curator: lifecycle lock write failed: %s', (error && error.message) || error)
+  }
+
+  // 卸载/热重载：先释放锁，再把最后一次使用落盘（markUsed 有 60s 节流，
+  // 进程正好在窗口内退出会丢掉这次使用 —— 2026-10-30 查到的 cloud-cost-estimation）。
+  ctx.effect(() => () => {
+    try { rmSync(lockPath, { force: true }) } catch { /* 已被清掉也算干净 */ }
+    lifecycle.flush()
+  }, 'skill-curator: lifecycle flush on dispose')
 
   // ---------------------------------------------------------------------
   // 工具注册：skill-library-*（全局注册；语义无害，写入受 excludedSkills 与「先读后改」约束）

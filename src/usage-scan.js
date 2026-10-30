@@ -30,8 +30,12 @@ export const REVIEW_LABEL = 'skill review'
 /** 维护类工具前缀：技能库读写不算使用。 */
 const MAINTENANCE_TOOL = /^skill-library-/
 
-/** `<任意前缀>/skills/<技能名>/<任意>` —— 只认目录边界，不认“名字像”。 */
-const SKILL_PATH = /[\\/]skills[\\/]([^\\/"'\s]+)[\\/]/g
+/**
+ * `<任意前缀>/skills/<技能名>` 后面跟分隔符或字符串结束。
+ * 允许结尾无斜杠：`ls ~/.dsh/skills/llm-wiki` 也是真实使用，漏记的方向是「更快被归档」，
+ * 与「宁可少归档」相反（2026-10-30 审计）。
+ */
+const SKILL_PATH = /[\\/]skills[\\/]([^\\/"'\s]+)(?:[\\/]|$)/g
 
 /** 单次参数扫描上限（字符）。run_code 的大脚本没必要为此付出正则成本。 */
 export const MAX_SCAN_BYTES = 200_000

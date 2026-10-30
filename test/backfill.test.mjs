@@ -98,6 +98,25 @@ test('--write 只增不减：已有更晚的时间戳不被回退', () => {
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).skills.alpha.lastUsedAt, ts + day, '不得回退到更早的时间')
 })
 
+test('lifecycle.lock 指向存活进程时 --write 必须拒绝（端口可配也能拦住）', () => {
+  const { home, file } = fixture()
+  writeFileSync(join(home, 'skill-curator', 'lifecycle.lock'), JSON.stringify({ pid: process.pid, at: Date.now() }))
+  const before = readFileSync(file, 'utf8')
+  // --port 1 保证端口探活失败：拦住写入的只能是锁
+  const res = run(home, ['--write', '--port', '1'])
+  assert.equal(res.status, 2, res.stdout + res.stderr)
+  assert.match(res.stderr, /lifecycle\.lock/)
+  assert.equal(readFileSync(file, 'utf8'), before, '拒绝时不得改盘')
+})
+
+test('lifecycle.lock 是死 pid（崩溃残留）时放行', () => {
+  const { home, file } = fixture()
+  writeFileSync(join(home, 'skill-curator', 'lifecycle.lock'), JSON.stringify({ pid: 2147483647, at: 0 }))
+  const res = run(home, ['--write', '--port', '1'])
+  assert.equal(res.status, 0, res.stdout + res.stderr)
+  assert.notEqual(readFileSync(file, 'utf8'), '', '死锁必须放行，否则崩溃后永远写不了')
+})
+
 test('dsh 在运行（端口可访问）时 --write 必须拒绝', async () => {
   const { home, file } = fixture()
   const before = readFileSync(file, 'utf8')

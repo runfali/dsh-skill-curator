@@ -45,6 +45,8 @@ const renderedTags = []
 // 渲染出来的文本节点（字符串子节点）。tree2 只是**元素树**（组件未执行），
 // 断言「面板上真的出现了这一组」必须看渲染产物，不是元素树。
 let renderedText = []
+// usage 分组 <ul hidden> 的可见性快照（折叠契约只能从这里断言，见 .SCc_lcUsage）
+let lcUsageHidden = []
 function renderTree(node) {
   if (node === null || node === undefined) return
   if (Array.isArray(node)) { for (const c of node) renderTree(c); return }
@@ -58,6 +60,9 @@ function renderTree(node) {
     return
   }
   if (typeof node.type === 'string') renderedTags.push(node.type)
+  if (node.props && typeof node.props.className === 'string' && node.props.className.includes('SCc_lcUsage')) {
+    lcUsageHidden.push(node.props.hidden)
+  }
   if (Array.isArray(node.children)) for (const c of node.children) renderTree(c)
   if (node.props && node.props.children !== undefined) renderTree(node.props.children)
 }
@@ -189,13 +194,21 @@ const expanded = makeElement(Component, {
 })
 expanded.props.open = true // 折叠状态由组件内部 useState 控制（见 reactStubOpen）
 let controlState = null
+// 只把**第一个** useState 顶成 true（设置卡/面板的折叠开关），其余一律返回真实初值。
+// 旧版对所有 hook 都返回 true：busy/restoreBusy/notice 全是 true，整场卡在
+// 「归档中…/恢复中…」，交互分支等于从没被测过（审计发现，2026-10-30）。
+let openStubCalls = 0
+const hookSeq = []
 const reactStubOpen = {
   useState: (init) => {
-    controlState = typeof init === 'function' ? init() : init
-    return [true, () => {}]
+    openStubCalls += 1
+    hookSeq.push('useState')
+    const value = openStubCalls === 1 ? true : (typeof init === 'function' ? init() : init)
+    if (openStubCalls === 1) controlState = value
+    return [value, () => {}]
   },
-  useEffect: () => {},
-  useSyncExternalStore: (s, g) => g()
+  useEffect: () => { hookSeq.push('useEffect') },
+  useSyncExternalStore: (s, g) => { hookSeq.push('useSyncExternalStore'); return g() }
 }
 const sandboxRequire2 = (name) => {
   if (name === 'react') return reactStubOpen
@@ -256,6 +269,7 @@ ok('expanded render (FieldRow all branches, status panel)')
 // ---- hooks 顺序守护：summary / detail 视图切换不得改变 hooks 数量 ----
 // 注：useCurator 是框架注入的 selector hook（不经 react 模块），这里只记录真实 react hooks
 const detailHooks = hookLog.length
+const detailSeq = hookLog.join(',')
 assert.ok(detailHooks >= 1, 'detail view calls the component hooks (' + detailHooks + ')')
 hookLog.length = 0
 const summaryTree = makeElement(Component, {
@@ -265,7 +279,7 @@ const summaryTree = makeElement(Component, {
   view: 'summary'
 })
 renderTree(summaryTree)
-assert.equal(hookLog.length, detailHooks, 'summary view must call the SAME hooks before returning (no early return before hooks)')
+assert.equal(hookLog.join(','), detailSeq, 'summary view must call the SAME hook sequence (no early return before hooks, no reordering)')
 ok('hooks order stable across summary/detail views')
 
 // ---- 保存流程（staged → scope.set）----
@@ -345,6 +359,25 @@ ok('save flow writes user layer')
     assert.ok(!text.includes('alpha-skill'), 'stale wouldArchive must not drive the archive list')
     ok('lifecycle panel renders usage groups (counts + names + ages)')
 
+    // 折叠契约的第二半：CSS 规则在，但 JSX 真得绑了 hidden。删掉 hidden: !open
+    // 后名字仍会出现在渲染树里（renderTree 不读 props.hidden），所以必须直接看属性。
+    assert.equal(lcUsageHidden.length, 3, 'three usage lists rendered (never / idle / archiveable)')
+    assert.ok(lcUsageHidden.every((v) => v === true), 'usage lists are collapsed by default')
+
+    // 静止态的按钮文案：busy 必须是 false（旧夹具恒 true，永远显示「归档中…」）
+    assert.ok(text.includes('归档选中（0）'), 'archive button reflects idle state + selection count')
+    assert.ok(text.includes('恢复选中（0）'), 'restore button reflects idle state')
+    assert.ok(!text.includes('归档中…') && !text.includes('恢复中…'), 'buttons must not be stuck in busy state')
+
+    // 面板 hooks 顺序：detail 与 summary 必须调用完全相同的序列（early-return 之前）
+    hookSeq.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
+    const panelDetailSeq = hookSeq.join(',')
+    hookSeq.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: fakeStatus, open: true } }))
+    assert.equal(hookSeq.join(','), panelDetailSeq, 'panel must call the same hook sequence in both views')
+    ok('lifecycle panel hook sequence stable across views')
+
     // 列表页一行摘要：不点进去也能看到三个数
     renderedText.length = 0
     renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: fakeStatus, open: true } }))
@@ -362,7 +395,18 @@ ok('save flow writes user layer')
     const legacyText = renderedText.join(' ')
     assert.ok(!legacyText.includes('undefined'), 'bad status must not leak undefined into copy')
     assert.ok(legacyText.includes('够格归档'), 'falls back to the legacy one-line summary')
-    ok('lifecycle summary degrades on partial status')
+
+    // 详情视图同样不能泄 undefined（守卫原先只加在 summary 一行）
+    renderedText.length = 0
+    lcUsageHidden = []
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: legacy, open: true } }))
+    const legacyDetail = renderedText.join(' | ')
+    assert.ok(!legacyDetail.includes('undefined'), 'detail view must not leak undefined either')
+    assert.ok(!legacyDetail.includes(' 天未用（'), 'no empty-threshold group title')
+    // 缺 staleDays：never-used（无阈值）与 archiveable（自带 45）照常显示，
+    // 只有 idle 那一组没有阈值可写 → 整组不渲染（不是渲染成 "undefined 天"）
+    assert.equal(lcUsageHidden.length, 2, 'groups without a threshold are dropped, not rendered with undefined')
+    ok('lifecycle panel degrades on partial status (summary + detail)')
   } finally {
     globalThis.fetch = realFetch
   }
