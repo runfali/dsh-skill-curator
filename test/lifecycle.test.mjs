@@ -327,10 +327,13 @@ test('markUsed / has 不接受原型魔法名：__proto__ 不得污染 Object.pr
   store.markUsed('constructor', { now: Date.now() })
   assert.equal(Object.hasOwn(store.snapshot().skills, 'constructor'), true, '合法名字可以登记')
   assert.equal(Object.prototype.constructor, Object, 'Object.prototype 不得被改写')
-  // 合法名字照常工作（白名单不能误伤 kebab-case / 点号）
+  // 合法名字照常工作（白名单与 harness 的 SKILL_ID 同源：小写 kebab）
   store.markUsed('ok-skill', { now: Date.now() })
-  store.markUsed('ok.skill_v2', { now: Date.now() })
-  assert.ok(store.has('ok-skill') && store.has('ok.skill_v2'))
+  store.markUsed('ok-skill-v2', { now: Date.now() })
+  assert.ok(store.has('ok-skill') && store.has('ok-skill-v2'))
+  // 与归档路由同源：记录得进却归档不了的僵尸名（大写/点/下划线）一律不收
+  store.markUsed('Not-Kebab', { now: Date.now() })
+  assert.equal(store.has('Not-Kebab'), false, '白名单必须与归档路由同源')
 })
 
 test('syncWith：技能根返回空列表时不得清空已有记录（读不到 ≠ 全被删）', () => {

@@ -27,9 +27,11 @@ export const DAY_MS = 86400000
  * 为什么必须有：`state.skills` 是普通对象，`state.skills['__proto__']` 命中的是
  * **Object.prototype**，ensure() 会把 lastUsedAt 直接写到整个进程共享的原型上
  * （2026-10-30 审计实测：markUsed('__proto__') 之后 ({}) .lastUsedAt 就有值了）。
- * 首字符不允许 `_`，所以 `__proto__` / `__defineGetter__` 在入口就被挡掉。
+ * 规则与 harness 自己的技能名（skill-tools.js 的 SKILL_ID）同源：小写 kebab。
+ * 放宽的代价是「记录能进、归档时被判非法名」的僵尸条目（archive 路由用严格规则）；
+ * `__proto__` / `__defineGetter__` 因为首字符是下划线，在入口就被挡掉。
  */
-export const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+export const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 /** 名字能否用作状态表键（非字符串 / 空串 / 原型魔法名一律拒绝）。 */
 export function isValidSkillName(name) {
