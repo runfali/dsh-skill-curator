@@ -388,6 +388,35 @@ test('syncWith：只剩 .git 时算真删光（点条目不计入存活）', () 
   assert.equal(res.dropped, 1, '技能库是 git 工作树，只剩 .git 时应判为真删光')
 })
 
+test('syncWith：两种根异常各报一次（告警开关不能互相顶掉）', () => {
+  const logs = []
+  const { root, store } = fixture({ log: (level, msg) => logs.push(msg) })
+  addSkill(root, 'a-skill')
+  store.syncWith(root)
+  store.syncWith(join(root, 'not-mounted'), []) // ① 根不存在
+  store.syncWith(root, []) // ② 根里还有目录但认不出技能
+  assert.equal(logs.length, 2, '两条诊断必须都能报出来（共用开关会顶掉一条）')
+  assert.ok(logs[0].includes('unreadable'), '诊断①文案')
+  assert.ok(logs[1].includes('0 recognized'), '诊断②文案')
+  store.syncWith(join(root, 'not-mounted'), [])
+  store.syncWith(root, [])
+  assert.equal(logs.length, 2, '同一诊断只报一次，不刷屏')
+})
+
+test('transitions：运行时技能永不计入 wouldArchive（磁盘上没目录，归档必失败）', () => {
+  const { store } = fixture()
+  const now = Date.now()
+  store.__replaceForTest({
+    skills: {
+      'runtime-old': { state: 'active', firstSeenAt: now - 400 * DAY_MS, lastUsedAt: now - 400 * DAY_MS, archivedAt: null, pinned: false, origin: 'runtime' }
+    },
+    lastPassAt: null
+  })
+  const counts = store.transitions({ staleDays: 30, archiveDays: 90, now, archiveEnabled: true, archiveFn: () => true })
+  assert.equal(counts.wouldArchive, 0, '与 summary()/usageReport() 口径一致')
+  assert.equal(counts.archived, 0)
+})
+
 test('syncWith：旧格式记录（无 origin 字段）同样受空根守卫保护', () => {
   // origin 是 2026-10-20 才加的；v0.2.0-rc.1 的 lifecycle.json 没有它。
   // 若 diskKnown 只数 origin==='disk'，这批记录会整条绕过守卫被静默清空。

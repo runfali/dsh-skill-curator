@@ -194,7 +194,7 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
      * 与磁盘同步：登记新技能、清理已消失的技能。
      * @param {string} root - 技能库根。
      * @param {string[]} [names] - 已知技能名；**省略时自己 readdir**（两种调用形态都必须成立）。
-     * @returns {{seeded: number, dropped: number, restored: number}}
+     * @returns {{seeded: number, dropped: number, restored: number, skippedEmpty?: boolean}}
      */
     syncWith(root, names) {
       let list = names
@@ -241,7 +241,7 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         //    漏掉 —— 这是已知未修的根因，这里只保证「漏掉时不至于清库」）、
         //    或 skillsRoot 指到了别的目录。
         //    「可读」不能证明「删光了」，此时清表就是不可逆的数据损失。
-        //    只排除点条目：技能库常是 git 工作树，只剩 .git 时仍应算「真删光」。
+        //    只排除点条目与普通文件：技能库常是 git 工作树，只剩 .git/README 时仍应算「真删光」。
         // 只认「目录类」条目（stat 会跟随 junction/软链）。普通文件（README/LICENSE）
         // 不算存活，否则删光技能后留一个 README 就永远清不掉僵尸记录。
         const survivorCount = entries.filter((e) => {
@@ -367,6 +367,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         // wouldArchive。少了这条，归档后每轮评审都报「1 个够格归档」而归档必然
         // 失败（目录不在）→ 永久虚报。
         if (rec.state === 'archived') continue
+        // 运行时技能（磁盘上没有目录）永不该进归档候选：summary()/usageReport()
+        // 都排除了它，唯独这里曾把它算进计数 → 工具与面板会报「够格 N 个」但归档必失败。
+        if (rec.origin === 'runtime') continue
         const anchor = anchorOf(rec)
         const ageDays = anchor === null ? 0 : (now - anchor) / DAY_MS
         const isStale = ageDays > stale
