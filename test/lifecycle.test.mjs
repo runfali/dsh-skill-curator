@@ -606,6 +606,21 @@ test('usageReport：lastUsedAt=0 视为坏数据（不是 1970 年用过）', ()
   assert.equal(r.neverUsed[0].days, 0)
 })
 
+test('usageReport：旧格式记录（无 origin 字段）也要进分桶', () => {
+  // origin 是 2026-10-20 才加的；升级后第一次 syncWith 之前，旧记录不该在面板上"消失"
+  const { store } = fixture()
+  const now = Date.now()
+  store.__replaceForTest({
+    skills: {
+      'legacy-old': { state: 'active', firstSeenAt: now - 100 * DAY_MS, lastUsedAt: null, archivedAt: null, pinned: false }
+    },
+    lastPassAt: null
+  })
+  const r = store.usageReport({ staleDays: 30, archiveDays: 90, now })
+  assert.deepEqual(r.neverUsed.map((x) => x.name), ['legacy-old'], '无 origin 视为磁盘技能')
+  assert.deepEqual(r.archiveable.map((x) => x.name), ['legacy-old'])
+})
+
 test('usageReport：阈值跟随设置，非法值响亮失败', () => {
   const { store } = fixture()
   const now = Date.now()

@@ -497,7 +497,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
      * 也刻意不塞进 summary()：`skill-library-lifecycle` 工具的输出契约写死在
      * review-prompt 里（"不含逐技能时间戳"），改它会污染评审子代理的上下文。
      *
-     * 过滤规则（三个桶共用）：只看磁盘技能（origin==='disk'）、排除已归档、排除钉住。
+     * 过滤规则（三个桶共用）：排除运行时技能（origin==='runtime'）、已归档、钉住。
+     * 注意用「排除 runtime」而不是「只要 disk」：origin 字段是后来才加的，
+     * 旧格式（无 origin）记录在第一次 syncWith 之前也得能算进来。
      * 运行时技能不在磁盘上，归档必失败，出现只会误导。
      *
      * 语义关系：`neverUsed ⊆ idle`（首见时间够老时）、`archiveable ⊆ idle`。
@@ -522,7 +524,7 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       }
       const rows = []
       for (const [name, rec] of Object.entries(state.skills)) {
-        if (rec.origin !== 'disk') continue
+        if (rec.origin === 'runtime') continue
         if (rec.state === 'archived') continue
         if (rec.pinned) continue
         // 坏数据兜底：手改/半写的 lifecycle.json 里 firstSeenAt 可能缺失或非数字，
