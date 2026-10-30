@@ -33,6 +33,7 @@ import { runSkillReview, REVIEW_AGENT_PRESET } from './reviewer.js'
 import { createSkillToolDefinitions, TOOL_NAMES, TOOLS_READY_SERVICE, CURATOR_AUTHOR, skillsRoot, gitRootOf, listSkills, runGit, SKILL_ID } from './skill-tools.js'
 import { createHistoryStore, defaultHistoryPath } from './history-store.js'
 import { createLifecycleStore } from './lifecycle.js'
+import { usageCandidates } from './usage-scan.js'
 import { CURATOR_SKILL } from './runtime-skill.js'
 
 /** Cordis 插件短名（路由/日志用）。 */
@@ -208,7 +209,7 @@ export function apply(ctx, config = {}) {
   }
 
   // ---------------------------------------------------------------------
-  // 使用观测：skill 工具被调用 = 该技能「被使用」
+  // 使用观测：什么算「用了一次技能」由 ./usage-scan.js 单点决定
   // ---------------------------------------------------------------------
   // 为什么用 tools/pre-execute 而不是 ctx.tools.guard()：
   //   guard 的语义是「同步拒绝」（返回字符串即拦下工具），而观测是纯副作用，
@@ -216,8 +217,11 @@ export function apply(ctx, config = {}) {
   //   dsh-experimental-auto-review:462、dsh-hooks-claude-code:248），签名 (exec, next)。
   // 为什么必须 return next()：这是 waterfall，不返回等于把工具拦掉。
   //
-  // 这一步修的是 dsh-learn 的核心缺陷：它的 last_used_at 只能由 SKILL.md 的 mtime
-  // 兜底（markUsed 是死代码），于是「30 天未用」实际是「30 天没改过文件」。
+  // 判据（2026-10-30 修）：旧实现只认 `skill` 工具 + 只算主会话，真机统计下
+  // test-driven-development 追踪期内 28 次加载全来自子代理 → 永远「从未使用」；
+  // llm-wiki 10 天 22 次直接读脚本/参考文件 → 全部漏记。
+  // 现在：skill 工具（含子代理，评审会话除外）+ 参数里命中技能目录 + 维护动作排除，
+  // 全部收在 usageCandidates() 里，历史回填脚本复用同一函数（判据不能有两套）。
   //
   // 定义位置必须在工具注册循环之前：Task 4 会把 lifecycle 传给
   // createSkillToolDefinitions(() => settings.spec(), () => lifecycle)，
@@ -228,17 +232,21 @@ export function apply(ctx, config = {}) {
   })
   ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => {
     try {
-      if (exec && exec.name === 'skill') {
-        const header = exec.agent && exec.agent.session && exec.agent.session.header
-        const isSubagent = header && (header.origin === 'subagent' || (typeof header.delegationDepth === 'number' && header.delegationDepth > 0))
-        const name = exec.arguments && exec.arguments.name
-        if (!isSubagent && typeof name === 'string') lifecycle.markUsed(name)
-      }
+      const names = usageCandidates({
+        tool: exec && exec.name,
+        args: exec && exec.arguments,
+        agent: exec && exec.agent
+      })
+      for (const name of names) lifecycle.markUsed(name)
     } catch (error) {
       ctx.logger.warn('skill-curator: usage observation failed: %s', (error && error.message) || error)
     }
     return next()
   }), 'skill-curator: usage observation')
+
+  // 卸载/热重载时把最后一次使用落盘：markUsed 有 60s 节流，进程正好在窗口内退出
+  // 会丢掉这次使用（2026-10-30 查到的 cloud-cost-estimation 就是这种形态）。
+  ctx.effect(() => () => { lifecycle.flush() }, 'skill-curator: lifecycle flush on dispose')
 
   // ---------------------------------------------------------------------
   // 工具注册：skill-library-*（全局注册；语义无害，写入受 excludedSkills 与「先读后改」约束）
@@ -597,7 +605,14 @@ export function apply(ctx, config = {}) {
             reviewPreset: await reviewPresetStatus(ctx),
             // 传 archiveDays 才带 wouldArchive —— UI「够格归档」的候选集必须与
             // transitions() 同源，否则面板会推荐一个 archive() 拒绝做的动作。
-            lifecycle: lifecycle.summary({ archiveDays: spec.archiveDays }),
+            lifecycle: {
+              ...lifecycle.summary({ archiveDays: spec.archiveDays }),
+              // 面板的三组年龄数字（从未使用 / N 天未用 / 够格归档）。
+              // 挂在 REST 上而不是 summary() 里：summary 同时喂给
+              // skill-library-lifecycle 工具，评审 prompt 已声明它「不含逐技能时间戳」，
+              // 往里加字段会改变评审子代理看到的契约。
+              usage: lifecycle.usageReport({ staleDays: spec.staleDays, archiveDays: spec.archiveDays })
+            },
             archiveEnabled: spec.archiveEnabled,
             reviews: reviewLog.recent().slice(0, 5)
           })

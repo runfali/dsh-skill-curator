@@ -45,9 +45,11 @@ const emptyState = () => ({ skills: {}, lastPassAt: null })
  * @param {string} [opts.archiveRoot] - 归档根（缺省 defaultArchiveRoot()）。
  * @param {(level: string, message: string) => void} [opts.log] - 告警钩子。
  */
-export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {}) {
+export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushThrottleMs = FLUSH_THROTTLE_MS } = {}) {
   const path = file || defaultLifecyclePath()
   const archivedRoot = archiveRoot || defaultArchiveRoot()
+  /** 落盘节流窗口（测试可缩短；生产用 FLUSH_THROTTLE_MS）。 */
+  const throttle = Number.isFinite(flushThrottleMs) && flushThrottleMs >= 0 ? flushThrottleMs : FLUSH_THROTTLE_MS
 
   let state = emptyState()
   try {
@@ -62,8 +64,11 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
   }
 
   let lastFlushAt = 0
+  /** 尾随 flush 定时器：节流窗口内最后一次使用必须在窗口结束时补写。 */
+  let flushTimer = null
 
   function persist() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
     try {
       mkdirSync(dirname(path), { recursive: true })
       const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
@@ -123,7 +128,14 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
         rec.state = 'active'
         rec.archivedAt = null
       }
-      if (now - lastFlushAt >= FLUSH_THROTTLE_MS) persist()
+      if (now - lastFlushAt >= throttle) persist()
+      // 节流窗口内：安排尾随 flush。没有它，进程正好在窗口内退出（重启/热重载）
+      // 就会永久丢掉这次使用 —— 2026-10-30 查到的 cloud-cost-estimation 即此形态。
+      else if (!flushTimer) {
+        const delay = Math.max(0, throttle - (now - lastFlushAt))
+        flushTimer = setTimeout(() => { flushTimer = null; persist() }, delay)
+        if (flushTimer && typeof flushTimer.unref === 'function') flushTimer.unref()
+      }
     },
 
     /**
@@ -339,6 +351,60 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {} } = {})
           .sort()
       }
       return result
+    },
+
+    /**
+     * 面板用的年龄分桶（三个数字 + 名单）。
+     *
+     * 与 summary() 的分工：summary() 是状态机快照（state 桶要等下一轮评审才刷新），
+     * 这里是**现算**的年龄视图，面板点开看到的就是当下的真实年龄，不滞后。
+     * 也刻意不塞进 summary()：`skill-library-lifecycle` 工具的输出契约写死在
+     * review-prompt 里（"不含逐技能时间戳"），改它会污染评审子代理的上下文。
+     *
+     * 过滤规则（三个桶共用）：只看磁盘技能（origin==='disk'）、排除已归档、排除钉住。
+     * 运行时技能不在磁盘上，归档必失败，出现只会误导。
+     *
+     * 语义关系：`neverUsed ⊆ idle`（首见时间够老时）、`archiveable ⊆ idle`。
+     * 面板必须把这点写出来，否则用户会奇怪"三个数加起来不对"。
+     *
+     * @param {object} opts
+     * @param {number} opts.staleDays - 多久未用算"久未用"
+     * @param {number} opts.archiveDays - 多久未用算"够格归档"
+     * @param {number} [opts.now] - 时间基准（测试注入）
+     * @returns {{staleDays: number, archiveDays: number, generatedAt: number,
+     *   neverUsed: Array<{name: string, lastUsedAt: number|null, days: number}>,
+     *   idle: Array<{name: string, lastUsedAt: number|null, days: number}>,
+     *   archiveable: Array<{name: string, lastUsedAt: number|null, days: number}>}}
+     */
+    usageReport({ staleDays, archiveDays, now = Date.now() } = {}) {
+      const stale = Number(staleDays)
+      const archive = Number(archiveDays)
+      if (!Number.isFinite(stale) || !Number.isFinite(archive)) {
+        throw new Error(
+          `lifecycle.usageReport: staleDays/archiveDays must be finite numbers (got ${staleDays}/${archiveDays})`
+        )
+      }
+      const rows = []
+      for (const [name, rec] of Object.entries(state.skills)) {
+        if (rec.origin !== 'disk') continue
+        if (rec.state === 'archived') continue
+        if (rec.pinned) continue
+        const anchor = rec.lastUsedAt ?? rec.firstSeenAt
+        rows.push({ name, lastUsedAt: rec.lastUsedAt ?? null, ageDays: (now - anchor) / DAY_MS })
+      }
+      const bucket = (predicate) =>
+        rows
+          .filter(predicate)
+          .map((r) => ({ name: r.name, lastUsedAt: r.lastUsedAt, days: Math.floor(r.ageDays) }))
+          .sort((a, b) => b.days - a.days || a.name.localeCompare(b.name))
+      return {
+        staleDays: stale,
+        archiveDays: archive,
+        generatedAt: now,
+        neverUsed: bucket((r) => !r.lastUsedAt),
+        idle: bucket((r) => r.ageDays > stale),
+        archiveable: bucket((r) => r.ageDays > archive)
+      }
     },
 
     /** 立即落盘。 */

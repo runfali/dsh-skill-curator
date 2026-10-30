@@ -864,13 +864,29 @@ test('tools/pre-execute 观测 skill 工具调用 → 记 lastUsedAt（子代理
   await cbs[0]({ name: 'bash', arguments: { command: 'ls' }, agent: { session: { header: {} } } }, next)
   assert.equal(life.snapshot().skills['bash'], undefined, '非 skill 工具不记')
 
-  // 子代理调用不计数（评审子代理读技能不是「使用」）
+  // 普通子代理调用**必须**计数（2026-10-30 改判）：评审/TDD 族技能 62%~87% 的加载
+  // 都来自子代理，只算主会话会让它们永远「从未使用」（TDD 追踪期 28 次全被子代理加载）。
   await cbs[0]({ name: 'skill', arguments: { name: 'beta-skill' }, agent: { session: { header: { origin: 'subagent' } } } }, next)
-  assert.equal(life.snapshot().skills['beta-skill'], undefined, '子代理不计数')
-
-  // 委派深度 > 0 同样不计数（origin 缺失时靠深度兜底）
+  assert.ok(life.snapshot().skills['beta-skill']?.lastUsedAt > 0, '普通子代理的加载必须计数')
   await cbs[0]({ name: 'skill', arguments: { name: 'gamma-skill' }, agent: { session: { header: { delegationDepth: 1 } } } }, next)
-  assert.equal(life.snapshot().skills['gamma-skill'], undefined, '委派深度 > 0 不计数')
+  assert.ok(life.snapshot().skills['gamma-skill']?.lastUsedAt > 0, '委派深度 > 0 也只是普通子代理，必须计数')
+
+  // 评审子代理自己的加载**不**计数：它读技能是为了维护技能库。
+  // 判据是 session header 的 agentPreset（0.2.1+ 由 reviewer.js 写入）。
+  await cbs[0]({ name: 'skill', arguments: { name: 'review-beta' }, agent: { session: { header: { origin: 'subagent', delegationDepth: 1, agentPreset: 'skill-curator-review' } } } }, next)
+  assert.equal(life.snapshot().skills['review-beta'], undefined, '评审会话的加载不得计数（否则全库被刷新鲜）')
+
+  // 路径命中：直接读技能文件 / 在技能目录里跑脚本也算一次使用（方案 1）。
+  await cbs[0]({ name: 'read', arguments: { file_path: 'C:\\Users\\x\\.dsh\\skills\\path-skill\\SKILL.md' }, agent: { session: { header: {} } } }, next)
+  assert.ok(life.snapshot().skills['path-skill']?.lastUsedAt > 0, '路径命中必须计数')
+  await cbs[0]({ name: 'ops_bash', arguments: { command: 'python3 /home/x/.dsh/skills/script-skill/scripts/run.py' }, agent: { session: { header: {} } } }, next)
+  assert.ok(life.snapshot().skills['script-skill']?.lastUsedAt > 0, '技能目录里跑脚本必须计数')
+
+  // 维护动作不算使用：即使参数里带着技能路径（评审读写技能库每周 2000+ 次）。
+  await cbs[0]({ name: 'skill-library-read', arguments: { name: 'maint-skill' }, agent: { session: { header: {} } } }, next)
+  assert.equal(life.snapshot().skills['maint-skill'], undefined, 'skill-library-* 不算使用')
+  await cbs[0]({ name: 'skill-library-write-file', arguments: { name: 'maint-skill', filePath: 'references/C:\\Users\\x\\.dsh\\skills\\maint-skill\\x.md' }, agent: { session: { header: {} } } }, next)
+  assert.equal(life.snapshot().skills['maint-skill'], undefined, '维护动作即使带技能路径也不算')
 
   // 必须放行（waterfall 语义：**必须真的调用 next()**，只返回 allow 字面量不算 ——
   // 不调 next 等于跳过后续监听器与内建处理，实际把工具拦掉，而返回值形状看不出来）
@@ -954,9 +970,16 @@ test('skill-library-lifecycle 的 archive/restore/pin 真的动盘且可回滚',
   )
 })
 
-test('status 接口回显生命周期摘要', async () => {
+test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字）', async () => {
   const env = makeCtx({})
   applyIn(env, { __webServerReady: true })
+  // 真放一个"100 天未用"的技能进临时技能根：分桶必须由**真实磁盘技能**驱动，
+  // 否则只验证了空数组形状（过去踩过"删掉整块渲染也全绿"）。
+  const root = env.__test.skillsRoot
+  mkdirSync(join(root, 'old-skill'), { recursive: true })
+  writeFileSync(join(root, 'old-skill', 'SKILL.md'), '---\nname: old-skill\ndescription: d\n---\n\nbody\n')
+  env.__test.lifecycle.markUsed('old-skill', { now: Date.now() - 100 * 86400000 })
+
   const route = env.__test.routes.find((r) => r.path === '/api/skill-curator/status')
   const body = await new Promise((resolve) => {
     const res = { writeHead() {}, end(payload) { resolve(JSON.parse(payload)) } }
@@ -964,6 +987,16 @@ test('status 接口回显生命周期摘要', async () => {
   })
   assert.ok(body.lifecycle, 'status 必须带 lifecycle')
   assert.equal(typeof body.lifecycle.stale.length, 'number')
+
+  const usage = body.lifecycle.usage
+  assert.ok(usage, 'status 必须带 usage 分桶（面板的三组数字）')
+  // 阈值必须来自设置（跟随），不能写死 30/90
+  assert.equal(usage.staleDays, 30, 'staleDays 跟随设置默认值')
+  assert.equal(usage.archiveDays, 90, 'archiveDays 跟随设置默认值')
+  assert.deepEqual(usage.archiveable.map((x) => x.name), ['old-skill'], '100 天未用的技能必须出现在够格归档里')
+  assert.equal(usage.archiveable[0].days, 100, '天数按天向下取整')
+  assert.ok(usage.idle.some((x) => x.name === 'old-skill'), '也在 30 天未用里（archiveable ⊆ idle）')
+  assert.equal(usage.neverUsed.length, 0, '刚 markUsed 过的技能不算从未使用')
 })
 
 // transitions() 对非有限 staleDays/archiveDays 会抛错（Task 2 的响亮失败设计），

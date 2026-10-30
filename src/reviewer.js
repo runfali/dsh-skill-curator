@@ -28,6 +28,8 @@
  *      Agent Preset 承载（见 REVIEW_AGENT_PRESET 与 src/preset-guard.js）。
  */
 import { settleRun } from './run-settlement.js'
+// 评审 preset 的真源在 usage-scan（回填脚本与线上观测共用同一判据）
+import { REVIEW_AGENT_PRESET } from './usage-scan.js'
 import { TOOL_NAMES } from './skill-tools.js'
 import { createCustomAdapter } from './custom-adapter.js'
 
@@ -41,7 +43,7 @@ export const CUSTOM_REVIEW_ROUTE = 'skill-curator-review'
  * 被宿主静默丢弃，`dsh-tool-subagent` 的 `config.toolFilter` 直接抛错并指向 preset。
  * preset 内挂 src/preset-guard.js，在**子代理自己的 scope** 上调 `tools.restrict()`。
  */
-export const REVIEW_AGENT_PRESET = 'skill-curator-review'
+export { REVIEW_AGENT_PRESET }
 
 /**
  * 自定义端点 adapter 的进程内注册记录：route -> { adapter, handle }。

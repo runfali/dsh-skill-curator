@@ -96,12 +96,29 @@ Paths are boundary-checked; writes are atomic (tmp + rename). Bodies over 150 li
 
 ## Skill lifecycle
 
-Each skill is tracked as `active → stale → archived` by **real use** (a `skill` tool load), not by file mtime:
+Each skill is tracked as `active → stale → archived` by **real use**, not by file mtime. What counts as a use (single source of truth: `src/usage-scan.js`):
 
-- `staleDays` (default 30) / `archiveDays` (default 90) — windows
+- A `skill` tool load — **main sessions and ordinary subagents both count** (62%~87% of loads for the review/TDD family happen in subagents; counting only main sessions marks them "never used" forever)
+- The **review subagent's own** loads do not count (judged by `agentPreset=skill-curator-review` in the session header) — otherwise every review would refresh the whole library
+- Any tool whose arguments reference `<...>/skills/<name>/...` counts — covers `read`, `grep`, and running scripts inside a skill directory
+- `skill-library-*` maintenance calls never count (2,000+ per week during review)
+
+Windows and state:
+
+- `staleDays` (default 30) / `archiveDays` (default 90) — the panel follows these settings
 - `archiveEnabled` (default **off**) — off means the review only *reports* which skills are eligible; nothing on disk moves
 - **pinning** — pin a skill via `skill-library-lifecycle` (there is no settings field for it) and it is exempt forever
 - Archived skills move to `<DSH_HOME>/skill-curator/archived/<name>/` — **outside** the library, so the host does not discover them, and `restore` brings them back
+
+The panel (Settings → Skill lifecycle) shows three counts, each expandable to names and ages: never used, unused for N+ days (`staleDays`), archiveable at M+ days (`archiveDays`). The last two are derived views — the first is a subset of the second, and everything is computed on read.
+
+Rebuild historical usage (loads from before the plugin existed, and from subagent sessions) with the one-shot script:
+
+```bash
+node scripts/backfill-usage.mjs          # dry run, prints the diff
+```
+
+Writing requires **dsh to be fully stopped** (the script probes port 31102 and refuses, because a running plugin rewrites the whole in-memory table and would clobber the backfill). Updates are max-only and backed up under `skill-curator/backups/` first.
 
 The plugin also registers a runtime skill named `skill-curator` so the model knows how to use the eleven `skill-library-*` tools.
 

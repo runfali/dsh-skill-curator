@@ -104,12 +104,35 @@ dsh plugin --profile web add ./
 
 ## 技能生命周期
 
-每个技能按 `active → stale → archived` 跟踪，判据是**真实使用**（`skill` 工具加载过），**不是文件 mtime**：
+每个技能按 `active → stale → archived` 跟踪，判据是**真实使用**，**不是文件 mtime**。什么算一次使用（判据唯一来源：`src/usage-scan.js`）：
 
-- `staleDays`（默认 30）/ `archiveDays`（默认 90）——两个时间窗口
+- `skill` 工具加载——**主会话与普通子代理都算**（评审/TDD 族技能 62%~87% 的加载来自子代理，只算主会话会让它们永远被判「从未使用」）
+- **评审子代理自己**的加载不算（判据：session header 的 `agentPreset=skill-curator-review`）——否则每轮评审都会把全库刷成「刚用过」
+- 任意工具的参数里命中 `<...>/skills/<技能名>/...` 也算——覆盖 `read`、`grep`、在技能目录里跑脚本（脚本型技能的真实用法）
+- `skill-library-*` 维护动作一律不算（评审读写技能库每周 2000+ 次）
+
+窗口与状态：
+
+- `staleDays`（默认 30）/ `archiveDays`（默认 90）——两个时间窗口，面板上的数字跟着设置走
 - `archiveEnabled`（默认**关**）——关着时评审只**报告**哪些技能够格，磁盘上什么都不动
 - **钉住**——用 `skill-library-lifecycle` 钉住（设置项里没有对应字段），永久免疫 stale 与归档
 - 归档 = 移到 `<DSH_HOME>/skill-curator/archived/<name>/`，**技能库之外**（宿主因此不会把归档技能当正常技能发现），`restore` 随时拉回来
+
+**面板**（设置 → 技能生命周期，独立入口）直接给出三组数字，点「展开」看名单与天数：
+
+- 从未使用（`lastUsedAt` 为空）
+- N 天未用（距最后一次使用超过 `staleDays`）
+- M 天够格归档（超过 `archiveDays`，勾选后可一键归档）
+
+后两组是派生视图：`N 天未用` 包含从未使用里已超龄的技能，`M 天够格` 是它的子集。全部**现算**，不依赖状态机刷新。
+
+历史使用记录（插件装上之前、以及子代理会话里的加载）可用一次性脚本重建：
+
+```bash
+node scripts/backfill-usage.mjs          # 干跑，只打印 diff
+```
+
+写入必须在 **dsh 完全退出后**执行（脚本会探活 31102 并拒绝，因为运行中的插件会把内存态整份写回，覆盖回填结果）；只增不减，写前自动备份到 `skill-curator/backups/`。
 
 插件还会注册一个名为 `skill-curator` 的运行时技能，让模型知道这十一个 `skill-library-*` 工具怎么用。
 

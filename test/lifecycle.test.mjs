@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLifecycleStore, DAY_MS } from '../src/lifecycle.js'
 
-function fixture() {
+function fixture(opts = {}) {
   const home = mkdtempSync(join(tmpdir(), 'sc-life-'))
   const root = join(home, 'skills')
   const file = join(home, 'skill-curator', 'lifecycle.json')
@@ -21,7 +21,7 @@ function fixture() {
   // ~/.dsh/skill-curator/archived，测试就把垃圾写进用户真技能库旁边（实测踩到）。
   process.env.DSH_HOME = home
   mkdirSync(root, { recursive: true })
-  return { home, root, file, store: createLifecycleStore({ file }) }
+  return { home, root, file, store: createLifecycleStore({ file, ...opts }) }
 }
 
 function addSkill(root, name) {
@@ -310,6 +310,83 @@ test('summary 的 wouldArchive 与 transitions 判定同源（推荐的都是真
   })
   assert.deepEqual(recommended, ['old-skill'], '面板推荐')
   assert.equal(counts.wouldArchive, 1, 'transitions 也认为它够格')
+})
+
+test('markUsed 节流窗口内的最后一次使用最终会落盘（尾随 flush）', async () => {
+  // 真机事故（2026-10-30）：cloud-cost-estimation 主会话加载成功，但 markUsed
+  // 落在 60s 节流窗口内，进程随后重启 → 这次使用永久丢失。尾随 flush 修的就是它。
+  const { file, store } = fixture({ flushThrottleMs: 10 })
+  const now = Date.now()
+  store.markUsed('first-skill', { now })            // 首次：立即落盘
+  const snapshot = readFileSync(file, 'utf8')
+  store.markUsed('second-skill', { now: now + 1 })  // 窗口内：先不落盘
+  assert.ok(!readFileSync(file, 'utf8').includes('second-skill'), '前置：窗口内不立即落盘')
+  await new Promise((r) => setTimeout(r, 60))
+  assert.ok(readFileSync(file, 'utf8').includes('second-skill'), '窗口过后必须自动补写（否则重启即丢）')
+  assert.notEqual(readFileSync(file, 'utf8'), snapshot, '补写后文件内容与首次不同')
+})
+
+// ---------------------------------------------------------------------------
+// usageReport：面板三组数字（未使用 / 超阈值未用 / 够格归档）
+// ---------------------------------------------------------------------------
+function seedState(store, skills) {
+  const map = {}
+  for (const [name, rec] of Object.entries(skills)) {
+    map[name] = {
+      state: 'active', firstSeenAt: Date.now(), lastUsedAt: null, archivedAt: null,
+      pinned: false, origin: 'disk', ...rec
+    }
+  }
+  store.__replaceForTest({ skills: map, lastPassAt: null })
+}
+
+test('usageReport：三个桶的天数口径与包含关系', () => {
+  const { store } = fixture()
+  const now = Date.now()
+  seedState(store, {
+    'used-recent': { lastUsedAt: now - 5 * DAY_MS, firstSeenAt: now - 200 * DAY_MS },
+    'used-old': { lastUsedAt: now - 40 * DAY_MS, firstSeenAt: now - 200 * DAY_MS },
+    'used-ancient': { lastUsedAt: now - 120 * DAY_MS, firstSeenAt: now - 200 * DAY_MS },
+    'never-old': { firstSeenAt: now - 50 * DAY_MS },
+    'never-new': { firstSeenAt: now - 2 * DAY_MS }
+  })
+  const r = store.usageReport({ staleDays: 30, archiveDays: 90, now })
+  assert.deepEqual(r.neverUsed.map((x) => x.name), ['never-old', 'never-new'], '从未使用按首见时间计龄')
+  assert.deepEqual(r.idle.map((x) => x.name), ['used-ancient', 'never-old', 'used-old'], '超过 staleDays（含从未使用里超龄的），按年龄降序')
+  assert.deepEqual(r.archiveable.map((x) => x.name), ['used-ancient'], '超过 archiveDays')
+  // 天数口径：整数天，向下取整
+  const ancient = r.archiveable[0]
+  assert.equal(ancient.days, 120)
+  assert.equal(ancient.lastUsedAt, now - 120 * DAY_MS)
+  const never = r.neverUsed.find((x) => x.name === 'never-old')
+  assert.equal(never.lastUsedAt, null, '从未使用必须显式给 null，前端据此区分')
+  assert.equal(never.days, 50)
+})
+
+test('usageReport：归档 / 运行时技能 / 钉住 都不进任何桶', () => {
+  const { store } = fixture()
+  const now = Date.now()
+  seedState(store, {
+    'kept-old': { lastUsedAt: now - 100 * DAY_MS },
+    'archived-skill': { state: 'archived', firstSeenAt: now - 400 * DAY_MS, archivedAt: now - 300 * DAY_MS },
+    'runtime-skill': { origin: 'runtime', firstSeenAt: now - 400 * DAY_MS },
+    'pinned-old': { lastUsedAt: now - 100 * DAY_MS, pinned: true }
+  })
+  const r = store.usageReport({ staleDays: 30, archiveDays: 90, now })
+  const all = [...r.neverUsed, ...r.idle, ...r.archiveable].map((x) => x.name)
+  assert.ok(!all.includes('archived-skill'), '已归档不得出现')
+  assert.ok(!all.includes('runtime-skill'), '运行时技能不在磁盘上，归档必失败，不得出现')
+  assert.ok(!all.includes('pinned-old'), '钉住 = 永久豁免')
+  assert.deepEqual(r.archiveable.map((x) => x.name), ['kept-old'])
+})
+
+test('usageReport：阈值跟随设置，非法值响亮失败', () => {
+  const { store } = fixture()
+  const now = Date.now()
+  seedState(store, { 'ten-days': { lastUsedAt: now - 10 * DAY_MS } })
+  assert.deepEqual(store.usageReport({ staleDays: 7, archiveDays: 90, now }).idle.map((x) => x.name), ['ten-days'], 'staleDays 改成 7 就应命中')
+  assert.deepEqual(store.usageReport({ staleDays: 30, archiveDays: 90, now }).idle, [], '默认 30 天不命中')
+  assert.throws(() => store.usageReport({ staleDays: undefined, archiveDays: 90 }), /finite numbers/)
 })
 
 test('markUsed 节流：60s 内多次调用只落盘一次', () => {

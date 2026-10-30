@@ -294,10 +294,19 @@ ok('save flow writes user layer')
       active: ['alpha-skill'],
       stale: ['beta-skill'],
       archived: ['gone-one', 'gone-two'],
-      neverUsed: [],
+      neverUsed: ['never-a'],
       pinned: [],
       wouldArchive: ['alpha-skill'],
-      lastPassAt: Date.now()
+      lastPassAt: Date.now(),
+      // 面板三组年龄数字：阈值跟随设置（这里给非默认值 14/45，
+      // 任何写死 30/90 的实现都会被断言抓住）
+      usage: {
+        staleDays: 14,
+        archiveDays: 45,
+        neverUsed: [{ name: 'never-a', days: 9, lastUsedAt: null }],
+        idle: [{ name: 'old-b', days: 40, lastUsedAt: Date.now() - 40 * 86400000 }],
+        archiveable: [{ name: 'old-c', days: 120, lastUsedAt: Date.now() - 120 * 86400000 }]
+      }
     }
   }
   const realFetch = globalThis.fetch
@@ -306,12 +315,31 @@ ok('save flow writes user layer')
   globalThis.fetch = () => Promise.resolve({ json: () => Promise.resolve(fakeStatus) })
   try {
     renderedText.length = 0
-    renderTree(makeElement(lifecycleComponent, { t: lcDict }))
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
     const text = renderedText.join(' | ')
     assert.ok(text.includes('技能生命周期'), 'panel title rendered through locale')
     // 关键：不能出现未解析的 locale key（渲染时 t() 必须命中字典）
     assert.ok(!/\blc\.[a-zA-Z]+\b/.test(text), 'no unresolved locale keys in the render tree')
-    ok('lifecycle panel renders (independent plugins.item entry)')
+
+    // 三组年龄数字：数量、阈值（必须来自 usage，不能写死 30/90）、名单与天数
+    assert.ok(text.includes('从未使用（1）'), 'never-used group with count')
+    assert.ok(text.includes('14 天未用（1）'), 'idle group bound to settings staleDays (14)')
+    assert.ok(text.includes('45 天够格归档（1）'), 'archiveable group bound to settings archiveDays (45)')
+    assert.ok(text.includes('never-a'), 'never-used name rendered')
+    assert.ok(text.includes('old-b · 40 天'), 'idle name + age rendered')
+    assert.ok(text.includes('old-c · 120 天'), 'archiveable name + age rendered')
+    // 旧的「久未用」状态桶必须消失（与年龄分组重复，会给出两个互相矛盾的数字）
+    assert.ok(!text.includes('久未用'), 'legacy stale bucket removed from the panel')
+    ok('lifecycle panel renders usage groups (counts + names + ages)')
+
+    // 列表页一行摘要：不点进去也能看到三个数
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: fakeStatus, open: true } }))
+    const summary = renderedText.join(' ')
+    assert.ok(summary.includes('从未用 1'), 'summary line shows never-used count')
+    assert.ok(summary.includes('14 天未用 1'), 'summary line shows idle count with setting threshold')
+    assert.ok(summary.includes('45 天够格 1'), 'summary line shows archiveable count')
+    ok('lifecycle summary line shows three counts')
   } finally {
     globalThis.fetch = realFetch
   }
