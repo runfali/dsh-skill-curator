@@ -388,6 +388,49 @@ test('syncWith：只剩 .git 时算真删光（点条目不计入存活）', () 
   assert.equal(res.dropped, 1, '技能库是 git 工作树，只剩 .git 时应判为真删光')
 })
 
+test('syncWith：旧格式记录（无 origin 字段）同样受空根守卫保护', () => {
+  // origin 是 2026-10-20 才加的；v0.2.0-rc.1 的 lifecycle.json 没有它。
+  // 若 diskKnown 只数 origin==='disk'，这批记录会整条绕过守卫被静默清空。
+  const { root, store, file } = fixture()
+  const now = Date.now()
+  const legacy = (at) => ({ state: 'active', firstSeenAt: at, lastUsedAt: null, archivedAt: null, pinned: false })
+  store.__replaceForTest({ skills: { 'old-a': legacy(now), 'old-b': legacy(now), 'old-c': legacy(now) }, lastPassAt: null })
+  store.flush() // 让状态文件真的落盘（真实场景里它本来就存在，.bak 才有东西可拷）
+
+  // ① 根不存在 → 必须原样保留
+  const missing = store.syncWith(join(root, 'not-mounted'), [])
+  assert.equal(missing.skippedEmpty, true, '旧格式记录也要走守卫')
+  assert.deepEqual(Object.keys(store.snapshot().skills).sort(), ['old-a', 'old-b', 'old-c'])
+
+  // ② 根存在且真空（连目录都没有，用户真删光）→ 清理，但必须先留 .bak
+  const res = store.syncWith(root, [])
+  assert.equal(res.dropped, 3)
+  assert.ok(existsSync(file + '.bak'), '旧格式触发清理时同样必须留快照')
+})
+
+test('syncWith：runtime 记录 firstSeenAt=0 不得被判 1970 删掉', () => {
+  const { root, store } = fixture()
+  store.__replaceForTest({
+    skills: { 'bad-runtime': { state: 'active', firstSeenAt: 0, lastUsedAt: 0, archivedAt: null, pinned: false, origin: 'runtime' } },
+    lastPassAt: null
+  })
+  const res = store.syncWith(root)
+  assert.equal(store.has('bad-runtime'), true, '锚点无效就不该判过期（删除比误判更不可逆）')
+  assert.equal(res.dropped, 0)
+})
+
+test('syncWith：根里只剩 README 这类普通文件时仍算真删光', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'a-skill')
+  addSkill(root, 'b-skill')
+  store.syncWith(root)
+  rmSync(join(root, 'a-skill'), { recursive: true })
+  rmSync(join(root, 'b-skill'), { recursive: true })
+  writeFileSync(join(root, 'README.md'), '# skills' + String.fromCharCode(10))
+  const res = store.syncWith(root, [])
+  assert.equal(res.dropped, 2, '普通文件不算存活，否则僵尸记录永远清不掉')
+})
+
 test('syncWith：长期未命中的 runtime 幽灵记录会被清掉（写错名字不会永久留痕）', () => {
   const { root, store } = fixture()
   store.markUsed('ghost-typo', { now: Date.now() - 200 * DAY_MS })

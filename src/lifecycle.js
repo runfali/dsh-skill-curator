@@ -15,7 +15,7 @@
  * 归档目录：<DSH_HOME>/skill-curator/archived/<name>/（**技能库之外**，
  * 否则宿主 provider 会把归档技能当正常技能发现）。
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -98,8 +98,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
   let lastFlushAt = 0
   /** 尾随 flush 定时器：节流窗口内最后一次使用必须在窗口结束时补写。 */
   let flushTimer = null
-  /** 技能根不可读的告警只打一次（/status 每 5s 会调一次 syncWith）。 */
-  let emptyRootWarned = false
+  /** 两条诊断各用一个一次性开关（共用一个会让后出现的那条永远不报）。 */
+  let rootUnreadableWarned = false
+  let rootDegradedWarned = false
 
   function persist() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
@@ -217,7 +218,10 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       // 技能根读不到 / 临时为空时 listSkills 会返回 []：绝不能当成「全被删了」。
       // 否则一次 readdir 失败就会清空所有 firstSeenAt/lastUsedAt（/status 每 30s
       // 轮询一次，随时可能撞上），目录恢复后重新登记为「首见=当下」，历史不可恢复。
-      const diskKnown = Object.values(state.skills).filter((r) => r.origin === 'disk' && r.state !== 'archived').length
+      // origin 字段是 2026-10-20 才引入的；更早的 lifecycle.json（v0.2.0-rc.1）没有它。
+      // 只数 origin==='disk' 会让旧格式整条绕过下面的守卫（diskKnown=0 → 直接清表）——
+      // 判据必须与 toDrop 的「origin==='runtime' 才豁免」口径一致。
+      const diskKnown = Object.values(state.skills).filter((r) => r.origin !== 'runtime' && r.state !== 'archived').length
       // 空列表触发的清理必须格外小心：三种情况长得一模一样，但只有一种是真的删光了。
       let emptyRootPrune = false
       if (list.length === 0 && diskKnown > 0) {
@@ -225,22 +229,30 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         try { entries = readdirSync(root, { withFileTypes: true }) } catch { entries = null }
         if (entries === null) {
           // ① 根读不到（权限/挂载/DSH_HOME 指错）→ 绝不能清表
-          if (!emptyRootWarned) {
-            emptyRootWarned = true
+          if (!rootUnreadableWarned) {
+            rootUnreadableWarned = true
             log('warn', `skill-curator: skill root unreadable (${root}) while ${diskKnown} skills are known; skip pruning (warned once)`)
           }
           return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
         }
-        // ② 根里还有**任何非点条目**，却一个技能都没认出来：判据不完整 ——
+        // ② 根里还有**目录类条目**，却一个技能都没认出来：判据不完整 ——
         //    SKILL.md 读不到（云同步脱水/权限/原子写窗口）、技能目录是 junction/软链
-        //    （Dirent.isDirectory() 为 false）、或 skillsRoot 指到了别的目录。
+        //    （skill-tools 的 listSkills 用 Dirent.isDirectory() 过滤，junction 会被
+        //    漏掉 —— 这是已知未修的根因，这里只保证「漏掉时不至于清库」）、
+        //    或 skillsRoot 指到了别的目录。
         //    「可读」不能证明「删光了」，此时清表就是不可逆的数据损失。
         //    只排除点条目：技能库常是 git 工作树，只剩 .git 时仍应算「真删光」。
-        const survivorCount = entries.filter((e) => !e.name.startsWith('.')).length
+        // 只认「目录类」条目（stat 会跟随 junction/软链）。普通文件（README/LICENSE）
+        // 不算存活，否则删光技能后留一个 README 就永远清不掉僵尸记录。
+        const survivorCount = entries.filter((e) => {
+          if (e.name.startsWith('.')) return false
+          if (e.isDirectory()) return true
+          try { return statSync(join(root, e.name)).isDirectory() } catch { return true }
+        }).length
         if (survivorCount > 0) {
-          if (!emptyRootWarned) {
-            emptyRootWarned = true
-            log('warn', `skill-curator: root ${root} has ${survivorCount} entr(ies) but 0 recognized skills while ${diskKnown} known; skip pruning (warned once)`)
+          if (!rootDegradedWarned) {
+            rootDegradedWarned = true
+            log('warn', `skill-curator: root ${root} has ${survivorCount} dir(s) but 0 recognized skills while ${diskKnown} known; skip pruning (warned once)`)
           }
           return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
         }

@@ -49,11 +49,13 @@ let renderedText = []
 let lcUsageHidden = []
 // 渲染过程中遇到的 <button> props（用来真的点一下「展开」）
 let renderedButtons = []
-// 每次顶层渲染前执行（递归不执行）。用可赋值变量而不是直接引用后定义的 const，
-// 否则在 TDZ 里访问会抛 ReferenceError。
+// 渲染前重置 hook 序号。注意：renderDepth===0 对**同一顶层的每个宿主子节点**都成立，
+// 所以 hook 序号基数会随树形（子节点个数/顺序）变化 —— 状态 Map 按序号存值，
+// 因此只在「独立渲染同一个组件」时可靠；跨组件复用要各自 clear。
+// 用可赋值变量而不是直接引用后定义的 const，否则 TDZ 里访问会抛 ReferenceError。
 let beforeRender = () => {}
 function renderTree(node) {
-  if (renderDepth === 0) beforeRender()
+  if (renderDepth === 0) beforeRender() // 见 beforeRender 注释：按宿主节点触发，不是"每次顶层渲染"一次
   if (node === null || node === undefined) return
   if (Array.isArray(node)) { for (const c of node) renderTree(c); return }
   if (typeof node === 'string' || typeof node === 'number') { renderedText.push(String(node)); return }
@@ -504,6 +506,15 @@ ok('save flow writes user layer')
     renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { __smoke: true, status: { error: true }, open: true } }))
     assert.ok(renderedText.join(' | ').includes('状态获取失败'), 'detail header shows error copy')
     ok('detail header distinguishes loading / error')
+
+    // 握手必须是真的门槛：没有 __smoke 的 __debug 不得生效（否则宿主/别人传个
+    // __debug:{} 就能把面板永久卡在"加载中"并吞掉 fetch 数据）
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true } }))
+    const noHandshake = renderedText.join(' | ')
+    assert.ok(noHandshake.includes('加载中…'), 'debug without __smoke must be ignored')
+    assert.ok(!noHandshake.includes('从未用 1'), 'injected status must not leak without the handshake')
+    ok('__debug seam requires the __smoke handshake')
   } finally {
     globalThis.fetch = realFetch
   }
