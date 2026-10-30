@@ -987,11 +987,15 @@ test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字�
   // 阈值必须用**非默认值**：默认就是 30/90，用默认值等于没测「跟随设置」
   // （把路由改成写死 {staleDays:30, archiveDays:90} 也会全绿 —— 审计抓到的假绿）。
   applyIn(env, { __webServerReady: true, staleDays: { get: () => 7 }, archiveDays: { get: () => 45 } })
-  // 真放两个技能进临时技能根：分桶必须由**真实磁盘技能**驱动，
+  // 真放四个技能进临时技能根：分桶必须由**真实磁盘技能**驱动，
   // 否则只验证了空数组形状（过去踩过"删掉整块渲染也全绿"）。
-  // 100 天 → 两组都进；40 天 → 进 idle（>7）、不进 archiveable（<45），正好卡边界。
+  // 年龄要能**区分阈值**，否则「回显 7/45、分桶却用 30/90」照样全绿（复审 2026-10-30）：
+  //   100 天 → 两组都进
+  //   60 天  → 必须进 archiveable（证明用的是 45 而不是 90）
+  //   40 天  → 进 idle、不进 archiveable（45 边界）
+  //   10 天  → 必须进 idle（证明用的是 7 而不是 30）
   const root = env.__test.skillsRoot
-  for (const [name, ageDays] of [['old-skill', 100], ['mid-skill', 40]]) {
+  for (const [name, ageDays] of [['old-skill', 100], ['late-skill', 60], ['mid-skill', 40], ['recent-skill', 10]]) {
     mkdirSync(join(root, name), { recursive: true })
     writeFileSync(join(root, name, 'SKILL.md'), '---\nname: ' + name + '\ndescription: d\n---\n\nbody\n')
     env.__test.lifecycle.markUsed(name, { now: Date.now() - ageDays * 86400000 })
@@ -1010,11 +1014,12 @@ test('status 接口回显生命周期摘要 + 年龄分桶（面板三组数字�
   // 阈值必须来自设置（跟随），不能写死 30/90
   assert.equal(usage.staleDays, 7, 'staleDays 必须跟随设置（写死 30 会红）')
   assert.equal(usage.archiveDays, 45, 'archiveDays 必须跟随设置（写死 90 会红）')
-  assert.deepEqual(usage.archiveable.map((x) => x.name), ['old-skill'], '100 天未用的技能必须出现在够格归档里')
+  assert.deepEqual(usage.archiveable.map((x) => x.name), ['old-skill', 'late-skill'], '100/60 天都必须进归档（60 天证明用的是 45 不是 90）')
   assert.equal(usage.archiveable[0].days, 100, '天数按天向下取整')
   const idleNames = usage.idle.map((x) => x.name)
-  assert.deepEqual(idleNames, ['old-skill', 'mid-skill'], 'idle 按年龄降序，两个都在（>7 天）')
+  assert.deepEqual(idleNames, ['old-skill', 'late-skill', 'mid-skill', 'recent-skill'], 'idle 按年龄降序（10 天证明用的是 7 不是 30）')
   assert.ok(!usage.archiveable.some((x) => x.name === 'mid-skill'), '40 天够不上 45 天阈值，不得进归档候选')
+  assert.ok(!usage.archiveable.some((x) => x.name === 'recent-skill'), '10 天不得进归档')
   assert.equal(usage.neverUsed.length, 0, '刚 markUsed 过的技能不算从未使用')
 })
 
@@ -1027,6 +1032,19 @@ test('apply 写运行态锁、dispose 释放（回填脚本靠它判断 dsh 是�
   assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid, '锁里必须是当前进程 pid')
   for (const dispose of t.effects) { if (typeof dispose === 'function') { try { dispose() } catch { /* 其余 disposer 无关 */ } } }
   assert.ok(!existsSync(lock), 'dispose 必须释放锁（崩溃残留会让回填永远写不进去）')
+})
+
+test('dispose 只删自己的锁：别的实例（不同 pid）的锁不得被清掉', () => {
+  // desktop + web 同 DSH_HOME 双开：A 写锁 → B 覆盖成自己的 pid → A 退出。
+  // 若 dispose 无条件 rmSync，A 会把 B 的锁删掉，回填护栏失效。
+  const env = makeCtx({})
+  applyIn(env, {})
+  const t = env.__test
+  const lock = join(dirname(t.lifecycle.path), 'lifecycle.lock')
+  writeFileSync(lock, JSON.stringify({ pid: process.pid + 1, at: Date.now() }))
+  for (const dispose of t.effects) { if (typeof dispose === 'function') { try { dispose() } catch { /* 无关 */ } } }
+  assert.ok(existsSync(lock), '别人的锁必须保留')
+  assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid + 1)
 })
 
 test('卸载时 flush：dispose 后节流窗口内的最后一次使用也已落盘', () => {

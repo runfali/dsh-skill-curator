@@ -192,7 +192,8 @@ const expanded = makeElement(Component, {
   hooks: { curator: store },
   ...injected
 })
-expanded.props.open = true // 折叠状态由组件内部 useState 控制（见 reactStubOpen）
+// 折叠态由组件内部 useState 控制（reactStubOpen 把首个 useState 顶成 true），
+// 这里不再往 props 上塞 open（那是死代码，组件根本不读）。
 let controlState = null
 // 只把**第一个** useState 顶成 true（设置卡/面板的折叠开关），其余一律返回真实初值。
 // 旧版对所有 hook 都返回 true：busy/restoreBusy/notice 全是 true，整场卡在
@@ -418,6 +419,59 @@ ok('save flow writes user layer')
     renderTree(makeElement(lifecycleComponent, { t: lcDict, view: 'summary', __debug: { status: { error: true }, open: true } }))
     assert.equal(renderedText.join(''), '状态获取失败', 'error state is not reported as "nothing to do"')
     ok('lifecycle summary distinguishes loading / error / idle')
+
+    // 展开态：夹具 setter 是空函数，只能靠 __debug.openUsage 注入。
+    // 没有这条，hidden: true（永远收起）也能全绿 —— 复审抓到的假绿。
+    renderedText.length = 0
+    lcUsageHidden = []
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: fakeStatus, open: true, openUsage: { idle: true } } }))
+    assert.deepEqual(lcUsageHidden, [true, false, true], 'only the idle group is expanded')
+    assert.ok(renderedText.join(' | ').includes('收起'), 'expanded group offers collapse')
+    ok('usage group can actually expand (hidden=false)')
+
+    // 阈值倒置（archive < stale）：「是它的子集」是假话，必须换文案
+    const inverted = JSON.parse(JSON.stringify(fakeStatus))
+    inverted.lifecycle.usage.staleDays = 90
+    inverted.lifecycle.usage.archiveDays = 30
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: inverted, open: true } }))
+    const invertedText = renderedText.join(' | ')
+    assert.ok(invertedText.includes('90 天未用（1）') && invertedText.includes('30 天够格归档（1）'), 'thresholds rendered from status')
+    assert.ok(!invertedText.includes('是它的子集'), 'inverted thresholds must not claim a subset')
+    assert.ok(invertedText.includes('不是'), 'inverted copy explains the relationship')
+    ok('inverted thresholds get their own copy')
+
+    // 空桶：不渲染「展开」按钮，也不渲染列表
+    const emptyBucket = JSON.parse(JSON.stringify(fakeStatus))
+    emptyBucket.lifecycle.usage.archiveable = []
+    renderedText.length = 0
+    lcUsageHidden = []
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: emptyBucket, open: true } }))
+    const emptyText = renderedText.join(' | ')
+    assert.equal(lcUsageHidden.length, 2, 'empty bucket renders no list')
+    assert.equal((emptyText.match(/展开/g) || []).length, 2, 'empty bucket renders no expand button')
+    assert.ok(emptyText.includes('45 天够格归档（0）'), 'count still shown for empty bucket')
+    ok('empty bucket has no expand affordance')
+
+    // 坏阈值类型（字符串 "14"）：整组不渲染，也不许写出 "14 天未用"
+    const badType = JSON.parse(JSON.stringify(fakeStatus))
+    badType.lifecycle.usage.staleDays = '14'
+    renderedText.length = 0
+    lcUsageHidden = []
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: badType, open: true } }))
+    const badTypeText = renderedText.join(' | ')
+    assert.equal(lcUsageHidden.length, 2, 'string threshold drops the idle group instead of coercing')
+    assert.ok(!badTypeText.includes('14 天未用'), 'no coerced threshold in copy')
+    ok('non-numeric thresholds are dropped, not coerced')
+
+    // 详情页头部：加载中 / 失败 两条新文案（之前只有 summary 分支有用例）
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { open: true } }))
+    assert.ok(renderedText.join(' | ').includes('加载中…'), 'detail header shows loading copy')
+    renderedText.length = 0
+    renderTree(makeElement(lifecycleComponent, { t: lcDict, __debug: { status: { error: true }, open: true } }))
+    assert.ok(renderedText.join(' | ').includes('状态获取失败'), 'detail header shows error copy')
+    ok('detail header distinguishes loading / error')
   } finally {
     globalThis.fetch = realFetch
   }

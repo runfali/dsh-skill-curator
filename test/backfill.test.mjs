@@ -98,6 +98,26 @@ test('--write 只增不减：已有更晚的时间戳不被回退', () => {
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).skills.alpha.lastUsedAt, ts + day, '不得回退到更早的时间')
 })
 
+test('状态表里出现 __proto__ 条目时必须跳过（不许把回填写到原型上）', () => {
+  const { home, file } = fixture()
+  // 手改/旧版本写坏的状态表：JSON.parse 会把 "__proto__" 建成**自有属性**
+  // （这是 JSON.parse 的特例），随后 Object.hasOwn 为真 —— 少了名字白名单就会
+  // 把它当正常记录写下去，回读核验也会失败（写不进去）。
+  const ts = 1793000000000
+  writeFileSync(file, '{"skills":{"__proto__":{"state":"active","firstSeenAt":' + ts +
+    ',"lastUsedAt":null,"archivedAt":null,"pinned":false,"origin":"disk"}},"lastPassAt":null}')
+  const dir = join(home, 'sessions', 'ws1', 's-proto')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'session.v4.jsonl.zstd'), Buffer.concat([
+    frame({ type: 'session', id: 's-proto', createdAt: ts - 1000 }),
+    frame({ type: 'tool/call', time: ts, data: { name: 'ops_bash', arguments: '{"command":"ls ~/.dsh/skills/__proto__/"}' } })
+  ]))
+  const res = run(home, ['--write', '--force'])
+  assert.equal(res.status, 0, res.stdout + res.stderr)
+  assert.ok(!res.stdout.includes('__proto__'), '不得出现在可更新列表里')
+  assert.equal(({}).lastUsedAt, undefined, 'Object.prototype 不得被污染')
+})
+
 test('lifecycle.lock 指向存活进程时 --write 必须拒绝（端口可配也能拦住）', () => {
   const { home, file } = fixture()
   writeFileSync(join(home, 'skill-curator', 'lifecycle.lock'), JSON.stringify({ pid: process.pid, at: Date.now() }))

@@ -38,7 +38,8 @@ function parseArgs(argv) {
     else if (a === '--port') out.port = Number(argv[++i]) || 31102
     else if (a === '--home') {
       const v = argv[++i]
-      if (!v) { console.error('--home 需要一个目录参数'); process.exit(2) }
+      // 也挡「把下一个开关当值」：--home --write 以前会把 --write 当目录
+      if (!v || v.startsWith('--')) { console.error('--home 需要一个目录参数'); process.exit(2) }
       out.home = v
     }
     else if (a === '--help' || a === '-h') {

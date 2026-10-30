@@ -265,7 +265,12 @@ export function apply(ctx, config = {}) {
   // 卸载/热重载：先释放锁，再把最后一次使用落盘（markUsed 有 60s 节流，
   // 进程正好在窗口内退出会丢掉这次使用 —— 2026-10-30 查到的 cloud-cost-estimation）。
   ctx.effect(() => () => {
-    try { rmSync(lockPath, { force: true }) } catch { /* 已被清掉也算干净 */ }
+    try {
+      // 只在锁仍是**本实例**的才删：desktop + web 共用 DSH_HOME 双开时，
+      // 先退出的实例会删掉另一实例的锁，回填护栏随之失效（2026-10-30 复审）。
+      const held = JSON.parse(readFileSync(lockPath, 'utf8'))
+      if (held && held.pid === process.pid) rmSync(lockPath, { force: true })
+    } catch { /* 锁不存在或内容坏了：不动它 */ }
     lifecycle.flush()
   }, 'skill-curator: lifecycle flush on dispose')
 

@@ -336,16 +336,29 @@ test('markUsed / has 不接受原型魔法名：__proto__ 不得污染 Object.pr
   assert.equal(store.has('Not-Kebab'), false, '白名单必须与归档路由同源')
 })
 
-test('syncWith：技能根返回空列表时不得清空已有记录（读不到 ≠ 全被删）', () => {
+test('syncWith：技能根**读不到**时不得清空已有记录', () => {
   const { root, store } = fixture()
   addSkill(root, 'a-skill')
   addSkill(root, 'b-skill')
   store.syncWith(root)
   const before = store.snapshot().skills
-  const res = store.syncWith(root, [])
-  assert.equal(res.dropped, 0, '空列表不得删任何记录')
+  // 不存在的根 = 读不到的典型形态（权限/挂载/DSH_HOME 指错同理）
+  const res = store.syncWith(join(root, 'not-mounted-here'), [])
+  assert.equal(res.dropped, 0, '读不到的根不得删任何记录')
   assert.equal(res.skippedEmpty, true)
   assert.deepEqual(store.snapshot().skills, before, 'firstSeenAt/lastUsedAt 必须原样保留')
+})
+
+test('syncWith：技能库**真的**被删光时照常清理（不能永久留僵尸）', () => {
+  const { root, store } = fixture()
+  addSkill(root, 'a-skill')
+  addSkill(root, 'b-skill')
+  store.syncWith(root)
+  // 根可读、里面确实空了 —— 这是用户手删，必须清理，否则面板永远报不存在的技能
+  const res = store.syncWith(root, [])
+  assert.equal(res.skippedEmpty, undefined, '可读的空库不是"读不到"')
+  assert.equal(res.dropped, 2, '真空库必须清理僵尸记录')
+  assert.deepEqual(Object.keys(store.snapshot().skills), [])
 })
 
 test('syncWith：长期未命中的 runtime 幽灵记录会被清掉（写错名字不会永久留痕）', () => {
@@ -355,6 +368,27 @@ test('syncWith：长期未命中的 runtime 幽灵记录会被清掉（写错名
   const res = store.syncWith(root)
   assert.equal(store.has('ghost-typo'), false, '超过 180 天未命中的 runtime 记录应被清掉')
   assert.ok(res.dropped >= 1)
+})
+
+test('syncWith：磁盘上叫 __proto__ 的目录不得写穿原型', () => {
+  const { root, store } = fixture()
+  addSkill(root, '__proto__')
+  const res = store.syncWith(root)
+  assert.equal(store.has('__proto__'), false)
+  assert.equal(({}).state, undefined, 'Object.prototype 不得被写 state/origin')
+  assert.equal(res.seeded, 0, '非法目录名不登记')
+})
+
+test('syncWith：磁盘上叫 constructor 的技能必须登记在自有属性上（不写全局 Object）', () => {
+  // 用普通 state.skills[name]=... 时，'constructor' 命中原型上的 Object 构造函数，
+  // origin='disk' 会被写到**全局 Object** 上，且这个技能不会被登记。
+  const { root, store, file } = fixture()
+  addSkill(root, 'constructor')
+  store.syncWith(root)
+  assert.equal(store.has('constructor'), true, '合法 kebab 名必须登记')
+  assert.equal(Object.origin, undefined, '绝不能把 origin 写到全局 Object 构造函数上')
+  store.flush()
+  assert.ok(readFileSync(file, 'utf8').includes('constructor'), '必须真正落盘')
 })
 
 test('syncWith：一次删 5 条以上先落 .bak 快照', () => {
@@ -450,6 +484,28 @@ test('usageReport：坏数据（缺 firstSeenAt / 非数字 lastUsedAt）不产�
   const broken = r.neverUsed.find((x) => x.name === 'broken-anchor')
   assert.equal(broken.days, 0, '缺锚点按 0 天处理')
   assert.equal(broken.lastUsedAt, null, '非数字 lastUsedAt 归一成 null')
+})
+
+test('transitions：lastUsedAt=0 不得被当成 1970 年（否则会真归档）', () => {
+  // 与 usageReport 同一把尺：0 是坏数据。不归一的话 ageDays ≈ 20000 天，
+  // archiveEnabled 打开后 transitions 会**真的**把目录移进 archived/，
+  // 而同一时刻面板说「从未使用」—— 2026-10-30 复审实测的形态。
+  const { root, store } = fixture()
+  addSkill(root, 'zero-skill')
+  const now = Date.now()
+  store.__replaceForTest({
+    skills: {
+      'zero-skill': { state: 'active', firstSeenAt: now - 3 * DAY_MS, lastUsedAt: 0, archivedAt: null, pinned: false, origin: 'disk' }
+    },
+    lastPassAt: null
+  })
+  const counts = store.transitions({
+    staleDays: 30, archiveDays: 90, archiveEnabled: true, now,
+    archiveFn: (name) => store.archive(name, root)
+  })
+  assert.equal(counts.wouldArchive, 0, '0 不是 1970 年 → 不得进归档候选')
+  assert.equal(counts.archived, 0, '绝不能真把目录移走')
+  assert.ok(existsSync(join(root, 'zero-skill')), '目录必须原地不动')
 })
 
 test('usageReport：lastUsedAt=0 视为坏数据（不是 1970 年用过）', () => {

@@ -38,6 +38,21 @@ export function isValidSkillName(name) {
   return typeof name === 'string' && SKILL_NAME.test(name)
 }
 
+/**
+ * 判定锚点：最后一次使用，没有就用首次登记。
+ *
+ * lastUsedAt === 0 / 非数字是**坏数据**，不是「1970 年用过」——不归一的话
+ * transitions() 会拿 1970 算年龄（≈20000 天）并真的把目录归档进 archived/，
+ * 而同一时刻 usageReport 说「从未使用」。三处判定必须共用这一个函数。
+ *
+ * @returns {number|null} 有效时间戳；都不可用时返回 null（按「刚登记」处理）
+ */
+function anchorOf(rec) {
+  if (Number.isFinite(rec.lastUsedAt) && rec.lastUsedAt > 0) return rec.lastUsedAt
+  if (Number.isFinite(rec.firstSeenAt) && rec.firstSeenAt > 0) return rec.firstSeenAt
+  return null
+}
+
 /** markUsed 的落盘节流窗口（毫秒）。 */
 export const FLUSH_THROTTLE_MS = 60_000
 
@@ -83,6 +98,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
   let lastFlushAt = 0
   /** 尾随 flush 定时器：节流窗口内最后一次使用必须在窗口结束时补写。 */
   let flushTimer = null
+  /** 技能根不可读的告警只打一次（/status 每 5s 会调一次 syncWith）。 */
+  let emptyRootWarned = false
 
   function persist() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
@@ -164,7 +181,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       // 节流窗口内：安排尾随 flush。没有它，进程正好在窗口内退出（重启/热重载）
       // 就会永久丢掉这次使用 —— 2026-10-30 查到的 cloud-cost-estimation 即此形态。
       else if (!flushTimer) {
-        const delay = Math.max(0, throttle - (now - lastFlushAt))
+        // clamp 到 [0, throttle]：回填会传**历史**时间戳，now - lastFlushAt 为负会让
+        // delay 大到超过 2^31-1ms，node 打 TimeoutOverflowWarning 并把 timer 压成 1ms。
+        const delay = Math.min(Math.max(0, throttle - (now - lastFlushAt)), throttle)
         flushTimer = setTimeout(() => { flushTimer = null; persist() }, delay)
         if (flushTimer && typeof flushTimer.unref === 'function') flushTimer.unref()
       }
@@ -200,13 +219,26 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
       // 轮询一次，随时可能撞上），目录恢复后重新登记为「首见=当下」，历史不可恢复。
       const diskKnown = Object.values(state.skills).filter((r) => r.origin === 'disk' && r.state !== 'archived').length
       if (list.length === 0 && diskKnown > 0) {
-        log('warn', `skill-curator: skill root listed 0 skills while ${diskKnown} are known; skip pruning this round`)
-        return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
+        // 区分两种"空"：
+        //   - 技能根读不到（readdir 抛错）→ 绝不能清表（会丢全部 firstSeenAt/lastUsedAt）
+        //   - 用户真的删光了技能库 → 必须正常清理，否则面板永远报已不存在的技能
+        let readable = true
+        try { readdirSync(root) } catch { readable = false }
+        if (!readable) {
+          if (!emptyRootWarned) {
+            emptyRootWarned = true
+            log('warn', `skill-curator: skill root unreadable while ${diskKnown} skills are known; skip pruning (warned once)`)
+          }
+          return { seeded: 0, dropped: 0, restored: 0, skippedEmpty: true }
+        }
       }
 
       let seeded = 0
       let restored = 0
       for (const name of list) {
+        // 目录名也要过白名单：磁盘上真有个叫 __proto__ 的目录时，普通赋值会把
+        // origin='disk' 写到原型上（defineProperty 不会，但没必要登记这种名字）。
+        if (!isValidSkillName(name)) continue
         const rec = Object.hasOwn(state.skills, name) ? state.skills[name] : null
         if (!rec) {
           ensure(name).origin = 'disk'
@@ -266,8 +298,9 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         try {
           copyFileSync(path, `${path}.bak`)
           log('warn', `skill-curator: pruning ${toDrop.length} skills; snapshot saved to ${path}.bak`)
-        } catch {
-          /* 备份失败不阻塞清理，但要留痕 */
+        } catch (error) {
+          // 备份失败不阻塞清理，但必须留痕（否则「写前留快照」这条承诺是空话）
+          log('warn', `skill-curator: lifecycle .bak snapshot failed: ${(error && error.message) || error}`)
         }
       }
       for (const name of toDrop) {
@@ -304,8 +337,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         // wouldArchive。少了这条，归档后每轮评审都报「1 个够格归档」而归档必然
         // 失败（目录不在）→ 永久虚报。
         if (rec.state === 'archived') continue
-        const anchor = rec.lastUsedAt ?? rec.firstSeenAt
-        const ageDays = (now - anchor) / DAY_MS
+        const anchor = anchorOf(rec)
+        const ageDays = anchor === null ? 0 : (now - anchor) / DAY_MS
         const isStale = ageDays > stale
         const archiveable = ageDays > archive
         if (archiveable) {
@@ -417,8 +450,8 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
             if (rec.pinned || rec.state === 'archived') return false
             // 运行时技能不在磁盘上，归档它只会失败 —— 不进候选集。
             if (rec.origin === 'runtime') return false
-            const anchor = rec.lastUsedAt ?? rec.firstSeenAt
-            return (now - anchor) / DAY_MS > days
+            const anchor = anchorOf(rec)
+            return anchor !== null && (now - anchor) / DAY_MS > days
           })
           .map(([n]) => n)
           .sort()
@@ -464,11 +497,10 @@ export function createLifecycleStore({ file, archiveRoot, log = () => {}, flushT
         if (rec.pinned) continue
         // 坏数据兜底：手改/半写的 lifecycle.json 里 firstSeenAt 可能缺失或非数字，
         // 直接相减会得到 NaN，NaN 参与排序与 JSON 序列化后变成 null / 乱序。
-        // lastUsedAt === 0 是「坏数据」而不是「1970 年用过」：不归一的话它既算
-        // 「从未使用」（!0 为真）又拿 1970 当锚点算年龄（≈20000 天，直接进归档候选）。
+        // 与 transitions()/summary() 共用 anchorOf：0 与非数字一律视为坏数据。
         const last = Number.isFinite(rec.lastUsedAt) && rec.lastUsedAt > 0 ? rec.lastUsedAt : null
-        const anchor = last !== null ? last : (Number.isFinite(rec.firstSeenAt) ? rec.firstSeenAt : now)
-        rows.push({ name, lastUsedAt: last, ageDays: Math.max(0, (now - anchor) / DAY_MS) })
+        const anchor = anchorOf(rec)
+        rows.push({ name, lastUsedAt: last, ageDays: anchor === null ? 0 : Math.max(0, (now - anchor) / DAY_MS) })
       }
       const bucket = (predicate) =>
         rows
