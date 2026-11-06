@@ -137,17 +137,17 @@ The review prompt carries a shape contract aimed squarely at "skills only ever g
 // package.json — machine-readable
 "engines": { "node": "^22.19.0 || >=24.0.0" },
 "peerDependencies": {          // the host runtime is the single source of truth; no bundled dsh-* copies
-  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0",
+  "@deepseek-ai/dsh-llm":      ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0 || >=0.2.2-alpha.0 <0.3.0",
   "@deepseek-ai/dsh-settings": "…same…",
   "@deepseek-ai/dsh-subagent": "…same…",
   "@deepseek-ai/dsh-tools":    "…same…",
-  "@deepseek-ai/schemastery":  "~3.18.4"     // .volatile() needs 3.18.4+
+  "@deepseek-ai/schemastery":  "~3.18.4 || ~3.19.0"   // .volatile() needs 3.18.4+; the 0.2.2 host ships 3.19.0
 },
 "devDependencies": { …local copies of the four dsh-* packages + schemastery… }  // no @deepseek-ai/dsh umbrella: it drags the whole host tree in
 ```
 
-- **Verified host**: `@deepseek-ai/dsh-desktop-runtime 0.2.1-rc.2` (Node v24) — real-machine verified, `/skill-refine` runs end to end.
-- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1` or `0.1.7-rc.2`, and the `0.2.0-alpha.0` group does **not** cover `0.2.1-rc.2` (its tuple is 0.2.1). `test/entry.test.mjs` pins this with a decision table, a counter-proof (reverting to the older range turns red), and a cross-check against the host's real `semver.satisfies`.
+- **Verified host**: `@deepseek-ai/dsh-desktop-runtime 0.2.2-rc.1` (Node v24); 0.2.1-rc.2 was real-machine verified end to end (`/skill-refine`).
+- **Why the disjunction is load-bearing**: npm semver only satisfies a prerelease from a range group that itself contains a prerelease with the same `[major,minor,patch]` tuple, so the plain `<0.2.0` group does **not** cover `0.1.5-rc.1` or `0.1.7-rc.2`, and the `0.2.0-alpha.0` group does **not** cover `0.2.1-rc.2` or `0.2.2-rc.1` (their tuples are newer). `test/entry.test.mjs` pins this with a decision table, a counter-proof (reverting to the older range turns red), and a cross-check against the host's real `semver.satisfies`.
 - **0.1.7 settings contract (what this adaptation was about)**: `settings.installSection` was removed from dsh-settings. The namespace **is** the cordis row id, `Config` must be exported from the plugin module, and every live-editable field must be `.volatile()` (the host's `_commitVolatile` rewrites the live reference in place, no fiber restart). The settings card therefore hangs off `configForms.get(ns)` and the `plugins.item` slot.
 - **No install scripts, no gyp/native deps**: the whole tree is plain ESM; `test/entry.test.mjs` guards this (no `install`/`postinstall`/`prepare`, no `optionalDependencies`, dependency scope limited to `@deepseek-ai/*`).
 
@@ -162,6 +162,39 @@ node test/client-smoke.mjs  # client bundle smoke (real component-tree execution
 ```
 
 All tests run inside a disposable `DSH_HOME`; no deployed instance is touched.
+
+## dsh 0.2.2-rc.1 compatibility notes
+
+Verified against the `0.2.2-rc.1` desktop runtime by unpacking its asar and calling the
+host's own `evaluatePluginCompatibility`. **0.2.2 breaks nothing this plugin touches —
+no source file changed.** The evidence is a method-surface diff against 0.2.1-rc.2, not a
+green test run alone:
+
+- **`LlmAdapter` surface unchanged** (7 members: `providerInfo`, `providerRetryPolicy`,
+  `imageRequestPricing`, `imageRequestTarget`, `listModels`, `resolveModel`, `prepareCall`)
+  — so the 0.2.1-era "abstract base gained a method" P0 does not recur, and
+  `src/custom-adapter.js` stands as written.
+- **`SubagentRuntime` surface unchanged** (20 members incl. `startActivation`,
+  `registerProvider`, `list`; still no `start`) — `src/reviewer.js` keeps branching on
+  "is the method present".
+- **Root exports intact**: `settleRunResult`, `attributionHeaders` and `defineTool` are
+  still exported, and `settleRun` is still absent from the `dsh-subagent` root — the
+  inlined `src/run-settlement.js` stays the right shape, and a run handle still publishes
+  `{ result, dispose }`.
+- **The built-in schemastery moved 3.18.4 → 3.19.0** (`dsh-settings` peer is `~3.19.0`).
+  Peer widened to `~3.18.4 || ~3.19.0` and the devDependency **pinned to 3.19.0** — the
+  trap is that pnpm otherwise auto-installs 3.18.4 and every test then validates the old
+  fixture. `.volatile()` still behaves the same at 3.19.0.
+- **The 0.2.2 clause is load-bearing for install, not for loading.** Against the previous
+  five-clause range the host gate returns PASS at `0.2.2-rc.1` (`includePrerelease`
+  admits the upper bound's neighbour), while strict semver returns false — so pnpm install
+  would refuse. `test/entry.test.mjs` pins both the decision table and that counter-proof.
+- **One stale guard was fixed while here**: the `inject` service-name check resolved a
+  hardcoded `/usr/lib/node_modules/...` path that never exists on Windows, so it had been
+  silently skipping (= fake green) since it was written. It now resolves
+  `@deepseek-ai/dsh-settings` / `dsh-tools` from the devDependencies and matches
+  `super(<anyContext>, "<service>")` — 0.2.2 renamed that variable to `ownerContext`,
+  which a literal `super(ctx, …)` assertion would have mis-reported as drift.
 
 ## dsh 0.2.1-rc.2 compatibility notes
 

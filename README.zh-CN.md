@@ -151,17 +151,17 @@ node scripts/backfill-usage.mjs          # 干跑，只打印 diff
 // package.json（机器可读）
 "engines": { "node": "^22.19.0 || >=24.0.0" },
 "peerDependencies": {            // 宿主运行时是唯一事实来源，插件不再自带 dsh-* 实体副本
-  "@deepseek-ai/dsh-llm":       ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0",
+  "@deepseek-ai/dsh-llm":       ">=0.1.2-alpha.3 <0.1.8 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-alpha.0 <0.1.8 || >=0.2.0-alpha.0 <0.3.0 || >=0.2.1-alpha.0 <0.3.0 || >=0.2.2-alpha.0 <0.3.0",
   "@deepseek-ai/dsh-settings":  "…same…",
   "@deepseek-ai/dsh-subagent":  "…same…",
   "@deepseek-ai/dsh-tools":     "…same…",
-  "@deepseek-ai/schemastery":   "~3.18.4"      // .volatile() 需要 3.18.4+
+  "@deepseek-ai/schemastery":   "~3.18.4 || ~3.19.0"   // .volatile() 需要 3.18.4+；0.2.2 宿主自带 3.19.0
 },
 "devDependencies": { …同 4 个 dsh-* 的本地副本 + schemastery… }   // 不装 @deepseek-ai/dsh 伞包：它会把整棵宿主依赖树拖进来
 ```
 
-- **已验证宿主**：`@deepseek-ai/dsh-desktop-runtime 0.2.1-rc.2`（Node v24）—— 真机验证，`/skill-refine` 端到端可跑。
-- **区间里的析取是承重的**：npm semver 只从「区间组自身含同 `[major,minor,patch]` 元组预发布」的组满足预发布，故单区间 `<0.2.0` 那组**覆盖不了** `0.1.5-rc.1` / `0.1.7-rc.2`，而 `0.2.0-alpha.0` 那组也**覆盖不了** `0.2.1-rc.2`（元组是 0.2.1）。`test/entry.test.mjs` 用判定表 + 反证（改回旧区间即红）+ 宿主真实 `semver.satisfies` 交叉验证钉住。
+- **已验证宿主**：`@deepseek-ai/dsh-desktop-runtime 0.2.2-rc.1`（Node v24）；0.2.1-rc.2 做过真机端到端验证（`/skill-refine` 可跑）。
+- **区间里的析取是承重的**：npm semver 只从「区间组自身含同 `[major,minor,patch]` 元组预发布」的组满足预发布，故单区间 `<0.2.0` 那组**覆盖不了** `0.1.5-rc.1` / `0.1.7-rc.2`，而 `0.2.0-alpha.0` 那组也**覆盖不了** `0.2.1-rc.2` / `0.2.2-rc.1`（元组更新）。`test/entry.test.mjs` 用判定表 + 反证（改回旧区间即红）+ 宿主真实 `semver.satisfies` 交叉验证钉住。
 - **0.1.7 设置契约（本插件的适配要点）**：`settings.installSection` 已从 dsh-settings 移除；命名空间 = cordis 行 id，`Config` 必须从插件模块导出，可热编辑字段必须 `.volatile()`（宿主 `_commitVolatile` 原地写活引用，不重启 fiber）。因此插件页设置卡走 `configForms.get(ns)` + `plugins.item` 槽位。
 - **无安装脚本、禁 gyp/原生编译**：全树纯 ESM，`test/entry.test.mjs` 守护（无 `install`/`postinstall`/`prepare`、无 `optionalDependencies`、依赖面仅 `@deepseek-ai/*`）。
 
@@ -176,6 +176,31 @@ node test/client-smoke.mjs  # client bundle 冒烟（真实执行组件树）
 ```
 
 测试全部在一次性 `DSH_HOME` 里跑，不碰任何已部署实例。
+
+## dsh 0.2.2-rc.1 适配结论
+
+针对 DSH `0.2.2-rc.1` 桌面包做了 asar 解包 + 调用宿主自带 `evaluatePluginCompatibility` 实测。
+**0.2.2 没有碰本插件依赖的任何一处契约——`src/*` 一行未改。** 证据是与 0.2.1-rc.2 的方法面 diff，
+不是"测试绿了"：
+
+- **`LlmAdapter` 方法面未变**（7 个：`providerInfo` / `providerRetryPolicy` / `imageRequestPricing` /
+  `imageRequestTarget` / `listModels` / `resolveModel` / `prepareCall`）——0.2.1 那类"抽象基类新增方法"
+  的 P0 不再复发，`src/custom-adapter.js` 原样成立。
+- **`SubagentRuntime` 方法面未变**（20 个，含 `startActivation` / `registerProvider` / `list`；
+  仍然没有 `start`）——`src/reviewer.js` 继续"按方法在不在"分叉。
+- **包根导出未变**：`settleRunResult` / `attributionHeaders` / `defineTool` 仍在，
+  `settleRun` 仍不在 `dsh-subagent` 包根——内联版 `src/run-settlement.js` 形状继续正确，
+  run 句柄仍是 `{ result, dispose }`。
+- **宿主自带 schemastery 从 3.18.4 抬到 3.19.0**（`dsh-settings` peer 为 `~3.19.0`）。
+  peer 放宽为 `~3.18.4 || ~3.19.0`，devDependencies **显式 pin 3.19.0**——坑在于 pnpm 否则会
+  自动装回 3.18.4 当夹具，测试就一直在测旧版本。3.19.0 下 `.volatile()` 行为不变。
+- **0.2.2 段是"安装期"承重，不是"加载期"**：对上一版五段区间，宿主闸在 `0.2.2-rc.1` 下仍 PASS
+  （`includePrerelease` 会放行上界邻近的预发布），但严格 semver 判 false——即 pnpm 安装期会拒。
+  `test/entry.test.mjs` 同时钉住判定表与这条反证。
+- **顺手修掉一条假绿守护**：`inject` 服务名核验原先解析写死的 `/usr/lib/node_modules/...`，
+  该路径在 Windows 上从不存在，所以这条守护自诞生起一直在**静默跳过**。现在改为从 devDependencies
+  解析 `@deepseek-ai/dsh-settings` / `dsh-tools`，并按 `super(<任意上下文变量>, "<服务名>")` 匹配
+  ——0.2.2 把这个变量改名成了 `ownerContext`，写死 `super(ctx, …)` 会假报漂移。
 
 ## dsh 0.2.1-rc.2 适配结论
 
