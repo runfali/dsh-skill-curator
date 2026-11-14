@@ -178,8 +178,26 @@ test('启动面：0.2.1 用 startActivation(spec)，spec 形状正确', async ()
   assert.equal(s.request.agentPreset, REVIEW_AGENT_PRESET, '工具白名单经 agent preset 生效')
   assert.equal(s.request.toolFilter, undefined, '0.2.1 不再接受 request.toolFilter')
   assert.ok(s.signal, 'admission 可取消')
+  // 0.2.2-rc.3 起宿主改读**顶层扁平**字段（dsh-subagent/lib/index.js:3024 `spec.parent.id`，
+  // 全树零处 `spec.request`）。两代 spec 必须同时给，否则新宿主在启动前抛
+  // `Cannot read properties of undefined (reading 'id')`，评审每次静默崩（2026-11-14 实机）。
+  assert.equal(s.parent, agent, 'rc.3 扁平 spec：spec.parent')
+  assert.deepEqual(s.prompt, [{ type: 'text', text: 'P' }], 'rc.3 扁平 spec：spec.prompt')
+  assert.equal(s.agentPreset, REVIEW_AGENT_PRESET, 'rc.3 扁平 spec：spec.agentPreset')
   assert.equal(out.ok, true)
   assert.equal(out.summary, '完成')
+})
+
+test('启动面：rc.3 扁平 spec 可被宿主准入守卫直接消费（spec.parent.id 可读）', async () => {
+  const { service, calls } = modernSubagents(() => okRun())
+  const ctx = { get: (k) => (k === 'subagents' ? service : undefined), logger: { info() {}, warn() {} } }
+  await runSkillReview(ctx, agent, { prompt: 'P', spec: spec(), getSpec: () => spec() })
+  const s = calls[0]
+  // 宿主原文：if (this.ctx.get('agents')?.get(spec.parent.id) !== spec.parent) throw ...
+  assert.equal(s.parent.id, 'sess-1', 'spec.parent 缺失 → 宿主读 id 时抛 TypeError，评审在启动前死')
+  assert.equal(s.label, 'skill review')
+  assert.equal(s.delivery, 'caller')
+  assert.equal(s.request.parent, agent, '旧宿主（≤0.2.2-rc.2）仍读嵌套 request')
 })
 
 test('启动面：0.2.1 不再传 request.toolFilter（宿主已静默丢弃该字段）', async () => {

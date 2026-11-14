@@ -44,7 +44,7 @@ ok('宿主入口真实 import 成功（apply / name / inject / Config 面齐备�
 // ---------------------------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 assert.equal(typeof pkg.version, 'string', 'package.json 缺 version')
-assert.equal(pkg.version, '0.2.2-rc.1', '版本号必须跟宿主发布号（家族惯例）')
+assert.equal(pkg.version, '0.2.2-rc.3', '版本号必须跟宿主发布号（家族惯例）')
 assert.equal(pkg.type, 'module', '必须是 ESM 包')
 assert.equal(pkg.exports['.'], './src/index.js', 'exports["."] 必须指向宿主入口')
 assert.equal(pkg.exports['./client'], './lib/client.js', 'exports["./client"] 必须指向 client bundle')

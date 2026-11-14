@@ -170,11 +170,19 @@ export function isEndpointModelFailure(errorOrDetail) {
  * 单次评审尝试：起子代理并结算（永不 reject；启动抛错向上传）。
  * 每次尝试独立 AbortController + 超时预算。
  *
- * 两代宿主的分叉（2026-10-18 适配轮）：
- *   - **0.2.1+**：`startActivation(spec)`，spec 形状 `{provider,label,request,signal,delivery}`。
+ * 三代宿主的分叉：
+ *   - **0.2.2-rc.3+**：`startActivation(spec)` 的 spec **扁平化**——宿主只读顶层
+ *     `spec.parent` / `spec.prompt` / `spec.agentPreset` / `spec.delivery`
+ *     （dsh-subagent/lib/index.js:3024 直接取 `spec.parent.id`，全文件零处 `spec.request`）。
+ *     只传嵌套 request 会让 `spec.parent` 为 undefined，评审在启动前抛
+ *     `Cannot read properties of undefined (reading 'id')`（2026-11-14 rc.3 实机故障）。
+ *   - **0.2.1 ~ 0.2.2-rc.2**：`startActivation(spec)`，spec 形状
+ *     `{provider,label,request,signal,delivery}`（request 是嵌套的一层）。
  *     它的 `signal` **只覆盖 admission**（起子会话期间的取消），不覆盖子代理执行期——
  *     所以超时必须**显式 dispose**，否则子代理会一直跑到自己结束（评审卡死 15 分钟）。
  *   - **≤0.2.0**：`start(name, request)`，signal 随 request 传入，run 自带 result/dispose。
+ *
+ * 兼容写法：同一个 request 既放 `request` 键也展开到顶层（`...request`），两代宿主各读各的。
  *
  * 探测方式用「方法在不在」而非版本号：宿主从不导出自己的版本给插件，
  * 且两个方法在各自代际里互斥存在（0.2.0 无 startActivation，0.2.1 无 start）。
@@ -194,7 +202,11 @@ async function runOnce(subagents, provider, request, label, timeoutMs) {
       const activation = await subagents.startActivation({
         provider,
         label,
+        // 两代 spec 一并给：≤0.2.2-rc.2 读嵌套 request；0.2.2-rc.3+ 读顶层扁平字段
+        // （宿主 dsh-subagent/lib/index.js:3024 直接取 spec.parent.id，全树零处 spec.request）。
+        // 只给嵌套 → 新宿主 spec.parent 为 undefined → 评审每次都在启动前抛 TypeError。
         request,
+        ...request,
         signal: controller.signal,
         // delivery='caller'：结算通知不回灌父会话（本插件的隔离红线），
         // 且不要求 sessionPersistence（评审子代理无需可续期）。
